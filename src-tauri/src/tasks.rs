@@ -39,8 +39,8 @@ pub struct GhRepo {
 
 /// A capped `gh` fetch: `has_more` is set when the result hit `limit`, meaning
 /// there may be additional rows the caller can fetch with a larger limit.
-/// `gh search` / `gh repo list` expose only `--limit`, not a cursor, so
-/// "load more" means re-running the same query with a bigger limit.
+/// `gh search` exposes only `--limit`, not a cursor, so "load more" means
+/// re-running the same query with a bigger limit.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct GhRepoPage {
     pub items: Vec<GhRepo>,
@@ -426,34 +426,60 @@ fn parse_gh_user(text: &str) -> Option<String> {
     None
 }
 
-/// `gh repo list --json nameWithOwner,isFork` → GhRepo[]. Cached 60s.
+/// `gh api user/repos` → GhRepo[]. Cached 60s.
+/// Not `gh repo list`: that only returns repos owned by the authenticated
+/// user, so org repos and repos shared via collaboration/teams never showed
+/// up in the picker. `/user/repos` with every affiliation lists everything
+/// the account can see, most recently pushed first.
 /// `limit` is caller-controlled so the repo picker can "load more" instead of
-/// silently truncating at a fixed cap — `gh repo list` has no cursor, only
-/// `--limit`, so a bigger page means re-running the whole listing.
+/// silently truncating at a fixed cap — pages are fetched up to `limit` and
+/// the whole listing re-runs when it grows.
 #[tauri::command(async)]
 pub fn tasks_github_repos(app: AppHandle, limit: i64) -> Result<GhRepoPage, String> {
     let limit = limit.clamp(1, 1000);
     let key = format!("gh:repos:{limit}");
     decode(cached_json(&app, &key, &gh_owner(), move || {
-        let limit_s = limit.to_string();
-        let raw =
-            run_gh(&["repo", "list", "--json", "nameWithOwner,isFork", "--limit", &limit_s])?;
-        let parsed: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-        let repos: Vec<GhRepo> = parsed
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| {
-                        let full = v.get("nameWithOwner")?.as_str()?.to_string();
-                        let id = full.split('/').last()?.to_string();
-                        Some(GhRepo { id, full, favorite: false })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let has_more = repos.len() as i64 == limit;
+        let per_page = limit.min(100);
+        let mut repos: Vec<GhRepo> = Vec::new();
+        let mut has_more = false;
+        let mut page = 1;
+        while (repos.len() as i64) < limit {
+            let path = format!(
+                "user/repos?affiliation=owner,collaborator,organization_member\
+                 &sort=pushed&per_page={per_page}&page={page}"
+            );
+            let batch = parse_user_repos(&run_gh(&["api", &path])?)?;
+            // A short page is the last one; a full page may have more behind it.
+            has_more = batch.len() as i64 == per_page;
+            repos.extend(batch);
+            if !has_more {
+                break;
+            }
+            page += 1;
+        }
+        if repos.len() as i64 > limit {
+            repos.truncate(limit as usize);
+            has_more = true;
+        }
         serde_json::to_value(GhRepoPage { items: repos, has_more }).map_err(|e| e.to_string())
     }))
+}
+
+/// One page of the REST `/user/repos` response → GhRepo[].
+fn parse_user_repos(raw: &str) -> Result<Vec<GhRepo>, String> {
+    let parsed: Value = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+    Ok(parsed
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| {
+                    let full = v.get("full_name")?.as_str()?.to_string();
+                    let id = full.split('/').last()?.to_string();
+                    Some(GhRepo { id, full, favorite: false })
+                })
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 /// preset ∈ {all, assigned, created, mentioned, review, open, closed}
@@ -1315,6 +1341,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(open.state, "open");
+    }
+
+    #[test]
+    fn parse_user_repos_keeps_org_and_collaborator_repos() {
+        let raw = r#"[
+            { "full_name": "me/own", "name": "own" },
+            { "full_name": "some-org/shared", "name": "shared" },
+            { "name": "missing-full-name" }
+        ]"#;
+        let repos = parse_user_repos(raw).unwrap();
+        let full: Vec<&str> = repos.iter().map(|r| r.full.as_str()).collect();
+        assert_eq!(full, ["me/own", "some-org/shared"]);
+        assert_eq!(repos[1].id, "shared");
     }
 
     #[test]

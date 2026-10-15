@@ -77,6 +77,43 @@
   padding: 3px;
 }
 
+/* Searchable menu: the input stays put while only the list scrolls. */
+.sp-drop-menu--search {
+  display: flex;
+  flex-direction: column;
+  max-height: 274px;
+  overflow: hidden;
+}
+
+.sp-drop-menu--search .sp-drop-list {
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.sp-drop-search {
+  flex-shrink: 0;
+  height: 26px;
+  margin: 1px 1px 5px;
+  padding: 0 8px;
+  background: var(--tempest-bg-hover);
+  border: 1px solid var(--tempest-border-default);
+  border-radius: 4px;
+  color: var(--tempest-fg-default);
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+}
+
+.sp-drop-search:focus {
+  border-color: var(--tempest-accent-blue);
+}
+
+.sp-drop-empty {
+  padding: 5px 8px;
+  color: var(--tempest-fg-muted);
+  font-size: 12px;
+}
+
 .sp-drop-icon {
   display: inline-flex;
   align-items: center;

@@ -38,9 +38,10 @@ export function GithubContextBar({
     : repos.find((r) => r.full === state.ghRepo || r.id === state.ghRepo)?.full ?? state.ghRepo;
 
   const repoOptions = [
-    { value: "all", label: "All repos" },
+    { value: "all", label: "All repos", pinned: true },
     ...repos.map((r) => ({ value: r.full, label: r.full })),
-    ...(reposHasMore ? [{ value: LOAD_MORE_REPOS, label: "Load more repos…" }] : []),
+    // Pinned so a search that misses the loaded page can still fetch more.
+    ...(reposHasMore ? [{ value: LOAD_MORE_REPOS, label: "Load more repos…", pinned: true }] : []),
   ];
 
   return (
@@ -49,6 +50,8 @@ export function GithubContextBar({
         <SpSelect
           value={state.ghRepo}
           options={repoOptions}
+          searchable
+          searchPlaceholder="Search repos…"
           onChange={(v) => {
             if (v === LOAD_MORE_REPOS) { onLoadMoreRepos(); return; }
             patch({ ghRepo: v });
