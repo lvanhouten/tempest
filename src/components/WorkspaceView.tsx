@@ -89,8 +89,11 @@ interface Props {
 }
 
 // Directories under .tempest/ that are internal to Tempest and must never be
-// treated as git worktrees in the sidebar.
+// treated as git worktrees in the sidebar. Dot-prefixed entries (the warm
+// worktree pool's staging slots) are internal too.
 const TEMPEST_INTERNAL_DIRS = new Set(["atlas", "logs"]);
+const isWorktreeDir = (e: { name: string; is_dir: boolean }) =>
+  e.is_dir && !e.name.startsWith(".") && !TEMPEST_INTERNAL_DIRS.has(e.name);
 
 import { folderName, timeAgo } from "../lib/format";
 import { getHookCommands, runHook, type HookKind } from "../lib/worktreeHooks";
@@ -370,7 +373,7 @@ export function WorkspaceView({ zen, name, path }: Props) {
       for (const [i, project] of projects.entries()) {
         openProjectPaths.add(project.path);
         const wts: { name: string; path: string }[] = [];
-        scans[i].filter((e) => e.is_dir && !TEMPEST_INTERNAL_DIRS.has(e.name)).forEach((e) => {
+        scans[i].filter(isWorktreeDir).forEach((e) => {
           wts.push({ name: e.name, path: e.path });
           diskWorktreePaths.add(e.path);
         });
@@ -527,7 +530,7 @@ export function WorkspaceView({ zen, name, path }: Props) {
     })
       .then((entries) =>
         setZenWorktrees(
-          entries.filter((e) => e.is_dir && !TEMPEST_INTERNAL_DIRS.has(e.name)).map((e) => ({ name: e.name, path: e.path }))
+          entries.filter(isWorktreeDir).map((e) => ({ name: e.name, path: e.path }))
         )
       )
       .catch(() => {});
@@ -1285,7 +1288,10 @@ export function WorkspaceView({ zen, name, path }: Props) {
     try {
       const result = await createWorktree({ projectPath: project.path, name });
       addWorktreeToState({ name: name.trim(), path: result.path }, projectId);
-      await runWorktreeHook("setup", project.path, projectId, result.path);
+      // Fire-and-forget: the agent spawns now, the setup hook runs behind it
+      // (mirrors launchBranch). Awaiting here made canvas launches block on
+      // hook work like npm install.
+      void runWorktreeHook("setup", project.path, projectId, result.path);
       return result.path;
     } catch (e) {
       console.error("Failed to create canvas worktree:", e);
@@ -1916,7 +1922,7 @@ export function WorkspaceView({ zen, name, path }: Props) {
     setProjects((prev) => [...prev, newProject]);
     invoke<{ name: string; path: string; is_dir: boolean }[]>("list_directory", { path: `${selected}/.tempest` })
       .then((entries) => {
-        setProjects((prev) => prev.map((p) => p.id === newProject.id ? { ...p, worktrees: entries.filter((e) => e.is_dir && !TEMPEST_INTERNAL_DIRS.has(e.name)).map((e) => ({ name: e.name, path: e.path })) } : p));
+        setProjects((prev) => prev.map((p) => p.id === newProject.id ? { ...p, worktrees: entries.filter(isWorktreeDir).map((e) => ({ name: e.name, path: e.path })) } : p));
       })
       .catch(() => {});
     invoke<string>("get_git_branch", { path: selected })

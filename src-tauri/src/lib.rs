@@ -2248,15 +2248,10 @@ fn ensure_tempest_gitignore(project_path: &std::path::Path) {
         .and_then(|mut f| std::io::Write::write_all(&mut f, append.as_bytes()));
 }
 
-// Gitignored-but-needed files that git won't carry into a worktree.
-// These are copied (not committed) from the project root into each new worktree.
-// Only small text files belong here — large dependency dirs are linked instead
-// (see DIRS_TO_LINK) to avoid 30–120s freezes copying tens of thousands of files.
-const FILES_TO_COPY: &[&str] = &[".env", ".env.local", ".env.development", ".env.production"];
-
 // Large dependency directories that are linked (junction on Windows, symlink on
 // Unix) rather than copied. Copying these recursively can be 200–800 MB and tens
 // of thousands of files, which froze the worker thread; a link is instantaneous.
+// Done on the background finisher thread — never before the agent launches.
 const DIRS_TO_LINK: &[&str] = &["node_modules", ".venv"];
 
 // Remove the junction (Windows) or symlink (Unix) entries for every DIRS_TO_LINK
@@ -2282,23 +2277,6 @@ fn remove_dir_links(worktree_path: &std::path::Path) {
             let _ = std::fs::remove_file(&link);
         }
     }
-}
-
-fn copy_file_or_dir(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
-    if src.is_dir() {
-        std::fs::create_dir_all(dst)?;
-        for entry in std::fs::read_dir(src)? {
-            let entry = entry?;
-            let dst_child = dst.join(entry.file_name());
-            copy_file_or_dir(&entry.path(), &dst_child)?;
-        }
-    } else {
-        if let Some(parent) = dst.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::copy(src, dst)?;
-    }
-    Ok(())
 }
 
 #[tauri::command(async)]
@@ -2359,182 +2337,165 @@ fn git_add_remote(repo_path: String, remote_url: String) -> Result<(), String> {
     Ok(())
 }
 
-// ── Worktree prep pool ───────────────────────────────────────────────────────
-// Speculative `git worktree add` after each consume, so the NEXT create in a
-// burst is a filesystem rename (`git worktree move` + `git branch -m`) instead
-// of a fresh checkout. The first create in a session still pays full cost;
-// once two creates land inside BURST_WINDOW the pool arms and every subsequent
-// one hits. The prep branches from HEAD at prep-time — if HEAD advances before
-// the take, the resulting branch is behind by that delta (user can rebase).
-// ponytail: 1 entry per project, in-memory, 5-min TTL, best-effort cleanup on
-// app restart via `worktree prune`. Bump the per-project cap if telemetry
-// shows contention from concurrent creates on the same project.
+// ── Worktree creation ────────────────────────────────────────────────────────
+// Latency contract: `create_pty_session` awaits ONLY registration below, then
+// spawns the agent immediately. The checkout, dep-dir junctions, and internal
+// bookkeeping all run on the background finisher — never inline.
+//
+// Registration is `git worktree add --no-checkout`: git creates the folder,
+// wires its .git link, and cuts the branch, but does NOT materialize HEAD. On a
+// large repo the checkout dominates (28s measured on Tempest's own repo) while
+// registration stays in the hundreds of milliseconds, so the agent boots into a
+// valid worktree whose files stream in behind it via `git reset --hard`.
+// Untracked files the agent writes before materialization survives the reset.
 
-const PREP_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
-const BURST_WINDOW: std::time::Duration = std::time::Duration::from_secs(5 * 60);
-
-struct PreparedEntry {
-    prep_path: std::path::PathBuf,
-    prep_branch: String,
-    created_at: std::time::Instant,
-}
-
-#[derive(Default)]
-struct PrepPool {
-    entries: std::collections::HashMap<std::path::PathBuf, PreparedEntry>,
-    last_consumed: std::collections::HashMap<std::path::PathBuf, std::time::Instant>,
-    in_flight: std::collections::HashSet<std::path::PathBuf>,
-}
-
-static PREP_POOL: std::sync::OnceLock<std::sync::Mutex<PrepPool>> = std::sync::OnceLock::new();
-
-fn prep_pool() -> &'static std::sync::Mutex<PrepPool> {
-    PREP_POOL.get_or_init(|| std::sync::Mutex::new(PrepPool::default()))
-}
-
-fn project_key(project: &std::path::Path) -> std::path::PathBuf {
-    std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf())
-}
-
-/// Pure: hand back a fresh entry, or None if stale/missing. The stale entry is
-/// still returned separately so the caller can schedule its cleanup.
-fn take_from(
-    pool: &mut PrepPool,
-    key: &std::path::Path,
-    now: std::time::Instant,
-) -> (Option<PreparedEntry>, Option<PreparedEntry>) {
-    match pool.entries.remove(key) {
-        Some(e) if now.duration_since(e.created_at) <= PREP_TTL => (Some(e), None),
-        Some(stale) => (None, Some(stale)),
-        None => (None, None),
-    }
-}
-
-/// Take and consume the prepared entry for this project, if any and not stale.
-/// Stale entries are removed and discarded in the background.
-fn take_prep(project: &std::path::Path) -> Option<PreparedEntry> {
-    let key = project_key(project);
-    let now = std::time::Instant::now();
-    let (fresh, stale) = {
-        let mut pool = prep_pool().lock().ok()?;
-        take_from(&mut pool, &key, now)
-    };
-    if let Some(stale) = stale {
-        let project = project.to_path_buf();
-        std::thread::spawn(move || {
-            let _ = new_command("git")
-                .args(["worktree", "remove", "--force", &stale.prep_path.to_string_lossy()])
-                .current_dir(&project)
-                .output();
-            let _ = new_command("git")
-                .args(["branch", "-D", &stale.prep_branch])
-                .current_dir(&project)
-                .output();
-        });
-    }
-    fresh
-}
-
-/// Move the prepped tree to the user's target path and rename its branch.
-/// On failure, unwinds the move so the caller can fall through to a fresh create.
-fn finalize_prep(
+/// One `git worktree add --no-checkout` against `project`. `branch_args` is
+/// either `["-b", name]` for a new branch or `[name]` to attach to an existing
+/// one. Returns trimmed stderr on failure.
+fn git_worktree_add(
     project: &std::path::Path,
-    prep: &PreparedEntry,
-    final_path: &std::path::Path,
-    branch_name: &str,
+    wt_path: &std::path::Path,
+    branch_args: &[&str],
 ) -> Result<(), String> {
-    let mv = new_command("git")
+    let path_str = wt_path.to_string_lossy().to_string();
+    let mut args: Vec<&str> = vec!["worktree", "add", "--no-checkout", &path_str];
+    args.extend_from_slice(branch_args);
+    let out = new_command("git")
+        .args(&args)
+        .current_dir(project)
+        .output()
+        .map_err(|e| format!("Failed to run git: {}", e))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// Register the worktree, creating a branch unless `existing_branch` names one
+/// to attach to. On the create path, a `branch named 'x' already exists`
+/// failure falls back to attach: the branch is a leftover from a workspace
+/// deleted without its branch, and reusing it matches how Tempest treats
+/// existing branches everywhere else.
+fn register_worktree(
+    project: &std::path::Path,
+    wt_path: &std::path::Path,
+    name: &str,
+    existing_branch: Option<&str>,
+) -> Result<(), String> {
+    if let Some(branch) = existing_branch {
+        return git_worktree_add(project, wt_path, &[branch]);
+    }
+    match git_worktree_add(project, wt_path, &["-b", name]) {
+        Ok(()) => Ok(()),
+        Err(e) if e.contains("a branch named") => git_worktree_add(project, wt_path, &[name]),
+        Err(e) => Err(e),
+    }
+}
+
+fn has_commits(project: &std::path::Path) -> bool {
+    new_command("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(project)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// First commit on a fresh repo so `git worktree add` has a HEAD to branch from.
+fn bootstrap_initial_commit(project: &std::path::Path) -> Result<(), String> {
+    ensure_tempest_gitignore(project);
+    let add = new_command("git")
+        .args(["add", "-A"])
+        .current_dir(project)
+        .output()
+        .map_err(|e| format!("Failed to run git: {}", e))?;
+    if !add.status.success() {
+        return Err(format!(
+            "git add failed: {}",
+            String::from_utf8_lossy(&add.stderr).trim()
+        ));
+    }
+    let commit = new_command("git")
         .args([
-            "worktree", "move",
-            &prep.prep_path.to_string_lossy(),
-            &final_path.to_string_lossy(),
+            "-c", "user.email=tempest@local",
+            "-c", "user.name=Tempest",
+            "commit", "--allow-empty", "-m", "Initial commit",
         ])
         .current_dir(project)
         .output()
-        .map_err(|e| e.to_string())?;
-    if !mv.status.success() {
-        return Err(String::from_utf8_lossy(&mv.stderr).trim().to_string());
-    }
-    let rn = new_command("git")
-        .args(["branch", "-m", &prep.prep_branch, branch_name])
-        .current_dir(project)
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !rn.status.success() {
-        let _ = new_command("git")
-            .args(["worktree", "remove", "--force", &final_path.to_string_lossy()])
-            .current_dir(project)
-            .output();
-        let _ = new_command("git")
-            .args(["branch", "-D", &prep.prep_branch])
-            .current_dir(project)
-            .output();
-        return Err(String::from_utf8_lossy(&rn.stderr).trim().to_string());
+        .map_err(|e| format!("Failed to run git: {}", e))?;
+    if !commit.status.success() {
+        return Err(format!(
+            "Repository has no commits and auto-commit failed: {}",
+            String::from_utf8_lossy(&commit.stderr).trim()
+        ));
     }
     Ok(())
 }
 
-fn build_prep(project: &std::path::Path) -> Result<PreparedEntry, String> {
-    let uuid = uuid::Uuid::new_v4().to_string();
-    let short = &uuid[..8];
-    let prep_path = project.join(".tempest").join(format!(".prep-{}", short));
-    let prep_branch = format!("tempest-prep/{}", short);
-    let out = new_command("git")
-        .args([
-            "worktree", "add",
-            &prep_path.to_string_lossy(),
-            "-b", &prep_branch,
-        ])
+/// Why a retry after registration failure did not proceed.
+enum RecoveryError {
+    /// A registered worktree still lives at the path — the user must rename.
+    WorkspaceExists,
+    /// The retry failed on its own; the original stderr is more informative.
+    Unrecoverable,
+}
+
+/// Recovery for a failed registration. Every step here is off the happy path:
+/// stale git metadata, orphan directories, and unborn HEADs, then one retry.
+fn recover_and_register(
+    project: &std::path::Path,
+    wt_path: &std::path::Path,
+    name: &str,
+    existing_branch: Option<&str>,
+) -> Result<(), RecoveryError> {
+    // Porcelain emits absolute paths with forward slashes; normalize ours the
+    // same way or the comparison silently misses on Windows.
+    let wt_str = wt_path.to_string_lossy().replace('\\', "/");
+    let registered = new_command("git")
+        .args(["worktree", "list", "--porcelain"])
         .current_dir(project)
         .output()
-        .map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
-    Ok(PreparedEntry {
-        prep_path,
-        prep_branch,
-        created_at: std::time::Instant::now(),
-    })
-}
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .any(|l| l.strip_prefix("worktree ").map(|p| p == wt_str).unwrap_or(false))
+        })
+        .unwrap_or(false);
 
-/// Pure: mutate the pool for this consume and report whether the caller
-/// should kick off a background rearm.
-fn decide_rearm(
-    pool: &mut PrepPool,
-    key: &std::path::Path,
-    now: std::time::Instant,
-) -> bool {
-    let prev = pool.last_consumed.insert(key.to_path_buf(), now);
-    let is_burst = prev.map_or(false, |t| now.duration_since(t) < BURST_WINDOW);
-    is_burst
-        && !pool.entries.contains_key(key)
-        && pool.in_flight.insert(key.to_path_buf())
-}
-
-/// Record this consume as the project's most recent, and — only if it falls
-/// inside a burst and no prep is already armed or in flight — kick off a
-/// background prep so the next create hits.
-fn record_consume_and_maybe_rearm(project: &std::path::Path) {
-    let key = project_key(project);
-    let now = std::time::Instant::now();
-    let should_rearm = {
-        let mut pool = prep_pool().lock().unwrap();
-        decide_rearm(&mut pool, &key, now)
-    };
-    if !should_rearm {
-        return;
-    }
-    let project = project.to_path_buf();
-    std::thread::spawn(move || {
-        let result = build_prep(&project);
-        let key = project_key(&project);
-        let mut pool = prep_pool().lock().unwrap();
-        pool.in_flight.remove(&key);
-        if let Ok(entry) = result {
-            pool.entries.insert(key, entry);
+    match (registered, wt_path.exists()) {
+        // Unregistered leftover directory — git never made this a worktree, so
+        // deleting it cannot lose anything registered.
+        (false, true) => {
+            std::fs::remove_dir_all(wt_path)
+                .map_err(|_| RecoveryError::Unrecoverable)?;
+            register_worktree(project, wt_path, name, existing_branch)
+                .map_err(|_| RecoveryError::Unrecoverable)
         }
-    });
+        // Registered but its directory vanished — stale metadata; prune renews it.
+        (true, false) => {
+            let _ = new_command("git")
+                .args(["worktree", "prune"])
+                .current_dir(project)
+                .output();
+            register_worktree(project, wt_path, name, existing_branch)
+                .map_err(|_| RecoveryError::Unrecoverable)
+        }
+        // Registered with the directory still present: genuinely ours, refuse.
+        (true, true) => Err(RecoveryError::WorkspaceExists),
+        // Unregistered and missing: the usual cause is an unborn HEAD (git has
+        // nothing to branch from). Bootstrap a commit and retry.
+        (false, false) => {
+            if !has_commits(project) {
+                bootstrap_initial_commit(project).map_err(|_| RecoveryError::Unrecoverable)?;
+                register_worktree(project, wt_path, name, existing_branch)
+                    .map_err(|_| RecoveryError::Unrecoverable)
+            } else {
+                Err(RecoveryError::Unrecoverable)
+            }
+        }
+    }
 }
 
 fn create_terminal_worktree_sync(
@@ -2548,138 +2509,53 @@ fn create_terminal_worktree_sync(
     // Sanitize the name for use as a filesystem directory: branch names like
     // "feat/my-feature" would create a real subdirectory without this replacement.
     let dir_name = name.replace('/', "-");
-
-    // 1. Ensure at least one commit exists so git worktree add has a HEAD to branch from.
-    let has_commits = new_command("git")
-        .args(["rev-parse", "--verify", "HEAD"])
-        .current_dir(project)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    if !has_commits {
-        ensure_tempest_gitignore(project);
-        let add = new_command("git")
-            .args(["add", "-A"])
-            .current_dir(project)
-            .output()
-            .map_err(|e| format!("Failed to run git: {}", e))?;
-        if !add.status.success() {
-            return Err(format!(
-                "git add failed: {}",
-                String::from_utf8_lossy(&add.stderr).trim()
-            ));
-        }
-        let commit = new_command("git")
-            .args([
-                "-c", "user.email=tempest@local",
-                "-c", "user.name=Tempest",
-                "commit", "--allow-empty", "-m", "Initial commit",
-            ])
-            .current_dir(project)
-            .output()
-            .map_err(|e| format!("Failed to run git: {}", e))?;
-        if !commit.status.success() {
-            return Err(format!(
-                "Repository has no commits and auto-commit failed: {}",
-                String::from_utf8_lossy(&commit.stderr).trim()
-            ));
-        }
-    }
-
-    // 2. Prune stale worktree metadata so a previous failed run can't block us.
-    let _ = new_command("git")
-        .args(["worktree", "prune"])
-        .current_dir(project)
-        .output();
-
     let worktree_path = tempest_dir.join(&dir_name);
 
-    // 3. Handle pre-existing path.
-    if worktree_path.exists() {
-        let list_out = new_command("git")
-            .args(["worktree", "list", "--porcelain"])
-            .current_dir(project)
-            .output()
-            .map_err(|e| e.to_string())?;
-        let listing = String::from_utf8_lossy(&list_out.stdout);
-        let wt_str = worktree_path.to_string_lossy();
-        let is_registered = listing
-            .lines()
-            .any(|l| l.strip_prefix("worktree ").map(|p| p == wt_str).unwrap_or(false));
-        if is_registered {
-            return Err(format!(
-                "A workspace named '{}' already exists. Choose a different name.",
-                name
-            ));
-        }
-        std::fs::remove_dir_all(&worktree_path)
-            .map_err(|e| format!("Failed to remove orphan directory: {}", e))?;
-    }
-
-    // 4. Create the worktree — try the prep pool first when eligible. A hit
-    //    turns this step into a rename; a miss or a failed finalize falls
-    //    through to a fresh `git worktree add`.
-    let from_prep = existing_branch.is_none()
-        && take_prep(project)
-            .map(|prep| finalize_prep(project, &prep, &worktree_path, name).is_ok())
-            .unwrap_or(false);
-    if !from_prep {
-        let wt_path_str = worktree_path.to_string_lossy().to_string();
-        let mut args = vec!["worktree", "add", &wt_path_str];
-        if let Some(branch) = existing_branch {
-            args.push(branch);
-        } else {
-            args.push("-b");
-            args.push(name);
-        }
-        let output = new_command("git")
-            .args(&args)
-            .current_dir(project)
-            .output()
-            .map_err(|e| format!("Failed to run git: {}", e))?;
-
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    // The single awaited step: hand the caller a registered folder with its
+    // branch cut. A warm slot — already materialized — is claimed first via
+    // two instant git operations; anything else falls through to the direct
+    // registration, whose recovery only runs on failure. Neither path ever
+    // runs a checkout inline, so the agent launches immediately.
+    let claimed = existing_branch.is_none() && claim_warm_worktree(project, &worktree_path, name);
+    if !claimed {
+        match register_worktree(project, &worktree_path, name, existing_branch) {
+            Ok(()) => {}
+            Err(first_err) => {
+                if let Err(recovery) =
+                    recover_and_register(project, &worktree_path, name, existing_branch)
+                {
+                    return Err(match recovery {
+                        RecoveryError::WorkspaceExists => format!(
+                            "A workspace named '{}' already exists. Choose a different name.",
+                            name
+                        ),
+                        RecoveryError::Unrecoverable => first_err,
+                    });
+                }
+            }
         }
     }
 
-    // 5. Write .tempest-pid to the worktree's git info/exclude so it never shows
-    //    up as an untracked file in git status. info/exclude is local-only and
-    //    never committed, making it the right place for tool-internal files.
-    {
-        let git_wt_dir = project.join(".git").join("worktrees").join(&dir_name);
-        let info_dir = git_wt_dir.join("info");
-        let _ = std::fs::create_dir_all(&info_dir);
-        let exclude_path = info_dir.join("exclude");
-        let existing = std::fs::read_to_string(&exclude_path).unwrap_or_default();
-        if !existing.lines().any(|l| l.trim() == ".tempest-pid") {
-            let append = if existing.is_empty() || existing.ends_with('\n') {
-                ".tempest-pid\n".to_string()
-            } else {
-                "\n.tempest-pid\n".to_string()
-            };
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&exclude_path)
-                .and_then(|mut f| std::io::Write::write_all(&mut f, append.as_bytes()));
-        }
-    }
+    // The agent can start now. Everything else runs while it is already
+    // launching — none of it may delay the PTY spawn above.
+    finish_worktree_in_background(project.to_path_buf(), worktree_path.clone());
 
-    // 6. Copy gitignored-but-needed files so the agent sees them without committing.
-    for name_to_copy in FILES_TO_COPY {
-        let src = project.join(name_to_copy);
-        if src.exists() {
-            let _ = copy_file_or_dir(&src, &worktree_path.join(name_to_copy));
-        }
-    }
+    // Top the pool up for the next create — one background arm per create,
+    // never inline.
+    std::thread::spawn({
+        let project = project.to_path_buf();
+        move || arm_warm_pool(&project)
+    });
 
-    // 6b. Link (don't copy) large dependency dirs. A directory junction (Windows)
-    //     or symlink (Unix) is instantaneous and shares one on-disk copy, instead
-    //     of recursively copying hundreds of MB. A failed link must never fail the
-    //     whole worktree creation — log and continue so the agent still gets a
-    //     usable tree (it can re-run install if the dep dir is missing).
+    Ok(worktree_path.to_string_lossy().to_string())
+}
+
+/// The large dependency dirs are never copied — a directory junction (Windows)
+/// or symlink (Unix) is instantaneous and shares one on-disk copy instead of
+/// duplicating hundreds of MB. A failed link must never fail whatever is
+/// calling it — log and continue so the agent still gets a usable tree (it can
+/// re-run install if the dep dir is missing).
+fn link_dep_dirs(project: &std::path::Path, worktree_path: &std::path::Path) {
     for dir_to_link in DIRS_TO_LINK {
         let src = project.join(dir_to_link);
         if !src.exists() {
@@ -2709,30 +2585,317 @@ fn create_terminal_worktree_sync(
             }
         }
     }
+}
 
-    // 7. Detect empty worktree and surface a clear error.
-    let is_empty = std::fs::read_dir(&worktree_path)
-        .map(|mut d| d.all(|e| e.map(|e| e.file_name() == ".git").unwrap_or(false)))
-        .unwrap_or(true);
-    if is_empty {
-        return Err(
-            "Workspace created but contains no files. Your project files may be untracked \
-             or gitignored. Run 'git add && git commit' in the project root first, or the \
-             agent will see an empty directory."
-                .into(),
-        );
+// ── Warm worktree pool ───────────────────────────────────────────────────────
+// A small per-project pool of fully prepared worktrees — registered, checked
+// out, and dep-linked — so the NEXT create is two instant git operations
+// (`worktree move` + `branch -m`) instead of any checkout. Slots are built on
+// a background thread after every create; the first create of a project pays
+// the fast direct path, later ones within the TTL hit the pool and their agent
+// boots into a fully populated folder. Claiming never runs a checkout, so the
+// launch-latency contract holds on both paths.
+
+const WARM_POOL_LIMIT: usize = 3;
+const WARM_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+struct WarmEntry {
+    path: std::path::PathBuf,
+    branch: String,
+    created_at: std::time::Instant,
+}
+
+#[derive(Default)]
+struct WarmPool {
+    entries: std::collections::HashMap<std::path::PathBuf, Vec<WarmEntry>>,
+    /// Projects with an arming thread running; serialises slot building so a
+    /// top-up can never overshoot the limit.
+    arming: std::collections::HashSet<std::path::PathBuf>,
+}
+
+static WARM_POOL: std::sync::OnceLock<std::sync::Mutex<WarmPool>> = std::sync::OnceLock::new();
+
+fn warm_pool() -> &'static std::sync::Mutex<WarmPool> {
+    WARM_POOL.get_or_init(|| std::sync::Mutex::new(WarmPool::default()))
+}
+
+fn warm_key(project: &std::path::Path) -> std::path::PathBuf {
+    std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf())
+}
+
+/// Clear the per-project arming flag whatever happens inside the arm body.
+struct WarmArmGuard(std::path::PathBuf);
+
+impl Drop for WarmArmGuard {
+    fn drop(&mut self) {
+        if let Ok(mut pool) = warm_pool().lock() {
+            pool.arming.remove(&self.0);
+        }
+    }
+}
+
+/// Teardown for a slot that will not be claimed: unlink dep junctions first so
+/// removal never traverses into the real node_modules, then drop registration
+/// and branch. Best-effort by design.
+fn discard_warm_entry(project: &std::path::Path, entry: WarmEntry) {
+    remove_dir_links(&entry.path);
+    let _ = new_command("git")
+        .args(["worktree", "remove", "--force", &entry.path.to_string_lossy()])
+        .current_dir(project)
+        .output();
+    let _ = new_command("git")
+        .args(["branch", "-D", &entry.branch])
+        .current_dir(project)
+        .output();
+}
+
+/// Build one fully prepared slot: register (no checkout), materialize HEAD,
+/// link dep dirs. Called only on the background arming thread.
+fn build_warm_entry(project: &std::path::Path) -> Option<WarmEntry> {
+    if !has_commits(project) {
+        return None; // nothing to branch from yet; the direct path bootstraps
+    }
+    let uuid = uuid::Uuid::new_v4().to_string();
+    let short = &uuid[..8];
+    let path = project.join(".tempest").join(format!(".warm-{}", short));
+    let branch = format!("tempest-prep/{}", short);
+    git_worktree_add(project, &path, &["-b", &branch]).ok()?;
+    let _ = new_command("git")
+        .args(["reset", "--hard"])
+        .current_dir(&path)
+        .output();
+    link_dep_dirs(project, &path);
+    Some(WarmEntry {
+        path,
+        branch,
+        created_at: std::time::Instant::now(),
+    })
+}
+
+/// Remove an unregistered `.warm-*` leftover from a previous app run: the
+/// registration is gone, so only the disk directory and the guessed prep
+/// branch need teardown.
+fn sweep_untracked_warm_dirs(project: &std::path::Path, registered: &[String]) {
+    let dir = project.join(".tempest");
+    let Ok(read) = std::fs::read_dir(&dir) else { return };
+    for item in read.flatten() {
+        let name = item.file_name().to_string_lossy().to_string();
+        if !name.starts_with(".warm-") {
+            continue;
+        }
+        let path = item.path();
+        let norm = path.to_string_lossy().replace('\\', "/");
+        if registered.iter().any(|p| p == &norm) {
+            continue;
+        }
+        remove_dir_links(&path);
+        let _ = std::fs::remove_dir_all(&path);
+        let suffix = name.trim_start_matches(".warm-");
+        let _ = new_command("git")
+            .args(["branch", "-D", &format!("tempest-prep/{suffix}")])
+            .current_dir(project)
+            .output();
+    }
+}
+
+/// Top the pool up for one project. One armer per project at a time; expired
+/// slots and unregistered leftovers from previous runs are discarded here too.
+/// Everything heavy (checkout per slot) stays on this background thread.
+fn arm_warm_pool(project: &std::path::Path) {
+    let key = warm_key(project);
+    {
+        let mut pool = warm_pool().lock().unwrap();
+        if !pool.arming.insert(key.clone()) {
+            return; // an armer for this project is already running
+        }
+    }
+    let _guard = WarmArmGuard(key.clone());
+
+    let registered: Vec<String> = new_command("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(project)
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter_map(|l| l.strip_prefix("worktree "))
+                .map(|p| p.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    sweep_untracked_warm_dirs(project, &registered);
+
+    let (capacity, stale) = {
+        let mut pool = warm_pool().lock().unwrap();
+        let vec = pool.entries.remove(&key).unwrap_or_default();
+        let now = std::time::Instant::now();
+        let (fresh, expired): (Vec<WarmEntry>, Vec<WarmEntry>) =
+            vec.into_iter().partition(|e| now.duration_since(e.created_at) <= WARM_TTL);
+        if !fresh.is_empty() {
+            pool.entries.insert(key.clone(), fresh);
+        }
+        let count = pool.entries.get(&key).map_or(0, |v| v.len());
+        (WARM_POOL_LIMIT.saturating_sub(count), expired)
+    };
+    for entry in stale {
+        discard_warm_entry(project, entry);
     }
 
-    ensure_tempest_gitignore(project);
+    for _ in 0..capacity {
+        let Some(entry) = build_warm_entry(project) else {
+            break;
+        };
+        warm_pool()
+            .lock()
+            .unwrap()
+            .entries
+            .entry(key.clone())
+            .or_default()
+            .push(entry);
+    }
+}
 
-    // Speculatively arm a spare so the next create in this burst is instant.
-    // Only when the current create used the fresh-branch path — an existing-
-    // branch consume can't be served by a prep (prep branches are always new).
-    if existing_branch.is_none() {
-        record_consume_and_maybe_rearm(project);
+/// Try to satisfy a fresh-branch create by claiming a prepared slot. On any
+/// miss the slot is discarded in the background and `false` returned, letting
+/// the caller fall through to the direct registration path.
+///
+/// The claim is two instant git operations — `worktree move` + `branch -m` —
+/// never a checkout, so the launch-latency contract holds. Slot slots already
+/// carry their materialized files and dep links.
+fn claim_warm_worktree(
+    project: &std::path::Path,
+    wt_path: &std::path::Path,
+    name: &str,
+) -> bool {
+    let key = warm_key(project);
+    let entry = {
+        let mut pool = match warm_pool().lock() {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        let vec = match pool.entries.get_mut(&key) {
+            Some(v) => v,
+            None => return false,
+        };
+        let now = std::time::Instant::now();
+        let Some(idx) = vec
+            .iter()
+            .position(|e| now.duration_since(e.created_at) <= WARM_TTL)
+        else {
+            return false;
+        };
+        let entry = vec.remove(idx);
+        if vec.is_empty() {
+            pool.entries.remove(&key);
+        }
+        entry
+    };
+
+    // A branch with the requested name already exists — the slot was cut from
+    // HEAD, not from that branch, so claiming it would mislabel the worktree.
+    // Existing-branch creates go direct; recycle the slot on a worker thread.
+    let branch_exists = new_command("git")
+        .args(["rev-parse", "--verify", &format!("refs/heads/{name}")])
+        .current_dir(project)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if branch_exists {
+        let project_owned = project.to_path_buf();
+        std::thread::spawn(move || discard_warm_entry(&project_owned, entry));
+        return false;
     }
 
-    Ok(worktree_path.to_string_lossy().to_string())
+    let moved = new_command("git")
+        .args([
+            "worktree", "move",
+            &entry.path.to_string_lossy(),
+            &wt_path.to_string_lossy(),
+        ])
+        .current_dir(project)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !moved {
+        let project_owned = project.to_path_buf();
+        std::thread::spawn(move || discard_warm_entry(&project_owned, entry));
+        return false;
+    }
+    let renamed = new_command("git")
+        .args(["branch", "-m", &entry.branch, name])
+        .current_dir(project)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !renamed {
+        // Unwind the move so the direct path's own recovery sees a sane state,
+        // then drop the slot.
+        let _ = new_command("git")
+            .args([
+                "worktree", "move",
+                &wt_path.to_string_lossy(),
+                &entry.path.to_string_lossy(),
+            ])
+            .current_dir(project)
+            .output();
+        let project_owned = project.to_path_buf();
+        std::thread::spawn(move || discard_warm_entry(&project_owned, entry));
+        return false;
+    }
+    true
+}
+
+/// Post-registration finishing work, run on a background thread so the agent
+/// never waits for it:
+///   1. junction/symlink the dependency dirs — instant, and the agent's first
+///      build needs them, so they go before the checkout,
+///   2. materialize the checkout the registration skipped,
+///   3. internal bookkeeping (per-worktree excludes, .gitignore entries).
+///
+/// Files are no longer copied into worktrees (`.env` etc.) — if a project needs
+/// them in the worktree it should declare so in its `setup` hook, which runs
+/// regardless.
+fn finish_worktree_in_background(project: std::path::PathBuf, worktree_path: std::path::PathBuf) {
+    std::thread::spawn(move || {
+        link_dep_dirs(&project, &worktree_path);
+
+        // Materialize HEAD. Files the agent wrote meanwhile are untracked and
+        // survive reset --hard untouched.
+        let _ = new_command("git")
+            .args(["reset", "--hard"])
+            .current_dir(&worktree_path)
+            .output();
+
+        // Keep the .tempest-pid sidecar (written later by the PTY itself, used
+        // for orphan sweeping) out of git status. info/exclude is local-only
+        // and never committed, making it the right place for tool-internal files.
+        let dir_name = worktree_path
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_default();
+        let info_dir = project
+            .join(".git")
+            .join("worktrees")
+            .join(&dir_name)
+            .join("info");
+        let _ = std::fs::create_dir_all(&info_dir);
+        let exclude_path = info_dir.join("exclude");
+        let existing = std::fs::read_to_string(&exclude_path).unwrap_or_default();
+        if !existing.lines().any(|l| l.trim() == ".tempest-pid") {
+            let append = if existing.is_empty() || existing.ends_with('\n') {
+                ".tempest-pid\n".to_string()
+            } else {
+                "\n.tempest-pid\n".to_string()
+            };
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&exclude_path)
+                .and_then(|mut f| std::io::Write::write_all(&mut f, append.as_bytes()));
+        }
+
+        ensure_tempest_gitignore(&project);
+    });
 }
 
 #[tauri::command]
@@ -2749,74 +2912,161 @@ async fn create_terminal_worktree(
 }
 
 #[cfg(test)]
-mod worktree_prep_tests {
+mod worktree_creation_tests {
     use super::*;
-    use std::path::PathBuf;
-    use std::time::{Duration, Instant};
 
-    fn mk_entry(age: Duration) -> PreparedEntry {
-        PreparedEntry {
-            prep_path: PathBuf::from("/tmp/.prep-xxx"),
-            prep_branch: "tempest-prep/xxx".to_string(),
-            created_at: Instant::now().checked_sub(age).unwrap_or_else(Instant::now),
+    fn temp_repo(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("tempest-wt-{}-{}", tag, uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = new_command("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        dir
+    }
+
+    fn commit(dir: &std::path::Path) {
+        let out = new_command("git")
+            .args([
+                "-c", "user.email=tempest@local",
+                "-c", "user.name=Tempest",
+                "commit", "--allow-empty", "-m", "init",
+            ])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "commit failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn registered_worktree_paths(project: &std::path::Path) -> Vec<String> {
+        let out = new_command("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(project)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| l.strip_prefix("worktree "))
+            .map(|p| p.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn registers_worktree_fast_without_checkout() {
+        let repo = temp_repo("basic");
+        std::fs::write(repo.join("file.txt"), "content").unwrap();
+        commit(&repo);
+        let path = create_terminal_worktree_sync(repo.to_str().unwrap(), "alpha", None).unwrap();
+        // Registered immediately — the agent can work in it right away — even
+        // though the checkout materializes on the background thread.
+        assert!(registered_worktree_paths(&repo)
+            .iter()
+            .any(|p| p.replace('\\', "/").contains(".tempest/alpha")));
+        assert!(std::path::Path::new(&path).join(".git").exists());
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn duplicate_name_refuses() {
+        let repo = temp_repo("dup");
+        std::fs::write(repo.join("file.txt"), "content").unwrap();
+        commit(&repo);
+        create_terminal_worktree_sync(repo.to_str().unwrap(), "alpha", None).unwrap();
+        let err = create_terminal_worktree_sync(repo.to_str().unwrap(), "alpha", None).unwrap_err();
+        assert!(err.contains("already exists"), "unexpected: {err}");
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn attaches_existing_branch() {
+        let repo = temp_repo("attach");
+        std::fs::write(repo.join("file.txt"), "content").unwrap();
+        commit(&repo);
+        let out = new_command("git")
+            .args(["branch", "keep"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let path =
+            create_terminal_worktree_sync(repo.to_str().unwrap(), "attach-wt", Some("keep"))
+                .unwrap();
+        let out = new_command("git")
+            .args(["-C", &path, "branch", "--show-current"])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "keep");
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn recovers_stale_metadata_by_pruning() {
+        let repo = temp_repo("stale");
+        std::fs::write(repo.join("file.txt"), "content").unwrap();
+        commit(&repo);
+        let path = create_terminal_worktree_sync(repo.to_str().unwrap(), "alpha", None).unwrap();
+        // Simulate a crashed run: directory deleted, git metadata still registered.
+        std::fs::remove_dir_all(&path).unwrap();
+        let path2 = create_terminal_worktree_sync(repo.to_str().unwrap(), "alpha", None);
+        assert!(path2.is_ok(), "recovery failed: {:?}", path2.err());
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn warm_pool_claim_serves_materialized_worktree() {
+        let repo = temp_repo("pool");
+        std::fs::write(repo.join("file.txt"), "content").unwrap();
+        commit(&repo);
+        // Build a slot the same way the arming thread does, then insert it.
+        let entry = build_warm_entry(&repo).expect("warm slot built");
+        {
+            let key = warm_key(&repo);
+            let mut pool = warm_pool().lock().unwrap();
+            pool.entries.entry(key).or_default().push(entry);
         }
+        let path = create_terminal_worktree_sync(repo.to_str().unwrap(), "alpha", None).unwrap();
+        // Claimed slot: fully populated immediately — no staged-deletions window.
+        assert!(std::path::Path::new(&path).join("file.txt").exists());
+        let out = new_command("git")
+            .args(["-C", &path, "status", "--short"])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "");
+        // The branch was renamed to the requested name.
+        let out = new_command("git")
+            .args(["-C", &path, "branch", "--show-current"])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "alpha");
+        std::fs::remove_dir_all(&repo).ok();
     }
 
     #[test]
-    fn first_consume_never_rearms() {
-        let mut pool = PrepPool::default();
-        let key = PathBuf::from("/p");
-        assert!(!decide_rearm(&mut pool, &key, Instant::now()));
-        assert_eq!(pool.in_flight.len(), 0);
-    }
-
-    #[test]
-    fn second_consume_inside_burst_rearms() {
-        let mut pool = PrepPool::default();
-        let key = PathBuf::from("/p");
-        let t0 = Instant::now();
-        decide_rearm(&mut pool, &key, t0);
-        assert!(decide_rearm(&mut pool, &key, t0 + Duration::from_secs(10)));
-        assert!(pool.in_flight.contains(&key));
-    }
-
-    #[test]
-    fn second_consume_outside_burst_does_not_rearm() {
-        let mut pool = PrepPool::default();
-        let key = PathBuf::from("/p");
-        let t0 = Instant::now();
-        decide_rearm(&mut pool, &key, t0);
-        assert!(!decide_rearm(&mut pool, &key, t0 + BURST_WINDOW + Duration::from_secs(1)));
-    }
-
-    #[test]
-    fn rearm_skipped_when_entry_already_armed() {
-        let mut pool = PrepPool::default();
-        let key = PathBuf::from("/p");
-        let t0 = Instant::now();
-        decide_rearm(&mut pool, &key, t0);
-        pool.entries.insert(key.clone(), mk_entry(Duration::from_secs(0)));
-        assert!(!decide_rearm(&mut pool, &key, t0 + Duration::from_secs(10)));
-    }
-
-    #[test]
-    fn take_returns_fresh_entry() {
-        let mut pool = PrepPool::default();
-        let key = PathBuf::from("/p");
-        pool.entries.insert(key.clone(), mk_entry(Duration::from_secs(10)));
-        let (fresh, stale) = take_from(&mut pool, &key, Instant::now());
-        assert!(fresh.is_some());
-        assert!(stale.is_none());
-    }
-
-    #[test]
-    fn take_discards_stale_entry() {
-        let mut pool = PrepPool::default();
-        let key = PathBuf::from("/p");
-        pool.entries.insert(key.clone(), mk_entry(PREP_TTL + Duration::from_secs(1)));
-        let (fresh, stale) = take_from(&mut pool, &key, Instant::now());
-        assert!(fresh.is_none());
-        assert!(stale.is_some());
+    fn expired_warm_slots_are_not_claimed() {
+        let repo = temp_repo("pool-stale");
+        std::fs::write(repo.join("file.txt"), "content").unwrap();
+        commit(&repo);
+        let mut entry = build_warm_entry(&repo).expect("warm slot built");
+        entry.created_at = std::time::Instant::now() - WARM_TTL - std::time::Duration::from_secs(1);
+        {
+            let key = warm_key(&repo);
+            let mut pool = warm_pool().lock().unwrap();
+            pool.entries.entry(key).or_default().push(entry);
+        }
+        // The expired slot must be skipped; the direct path serves the create.
+        let path = create_terminal_worktree_sync(repo.to_str().unwrap(), "alpha", None).unwrap();
+        assert!(std::path::Path::new(&path).join(".git").exists());
+        std::fs::remove_dir_all(&repo).ok();
     }
 }
 
