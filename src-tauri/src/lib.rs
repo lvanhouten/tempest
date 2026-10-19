@@ -2933,6 +2933,16 @@ mod worktree_creation_tests {
 
     fn commit(dir: &std::path::Path) {
         let out = new_command("git")
+            .args(["add", "-A"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git add failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let out = new_command("git")
             .args([
                 "-c", "user.email=tempest@local",
                 "-c", "user.name=Tempest",
@@ -4208,6 +4218,24 @@ mod agent_shell_args_tests {
     }
 }
 
+// ── Session launch ────────────────────────────────────────────────────────────
+
+/// Shell-quote one agent argument for the target interpreter. The escapes for a
+/// literal `'` inside a `'...'` string differ:
+///   PowerShell → `''`  (doubled)
+///   POSIX sh   → `'\''` (close, escaped literal, reopen)
+/// The previous `'''` worked for neither and blew up on prompts
+/// containing apostrophes (e.g. issue-body checklists like `I'm ...`).
+#[cfg(windows)]
+fn quote_arg(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+#[cfg(not(windows))]
+fn quote_arg(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WorktreeAddSpec {
@@ -4218,6 +4246,7 @@ struct WorktreeAddSpec {
 
 #[tauri::command]
 async fn create_pty_session(
+    app: tauri::AppHandle,
     session_id: String,
     cwd: String,
     rows: u16,
@@ -4272,18 +4301,34 @@ async fn create_pty_session(
     // call performs the ~100–200ms probe so no individual session pays for it twice.
     SHELL.get_or_init(resolve_shell);
 
-    // DB isolation: spin up a Docker branch of the base image and inject env vars.
-    // Silently skipped if no base image exists or Docker is unavailable.
-    let db_branch: Option<dbiso::DbBranch> = if db_isolation.unwrap_or(false) {
-        if dbiso::get_current_base_image(&cwd).is_some() {
-            let branch_name = format!("tempest-{}", &session_id[..8.min(session_id.len())]);
-            dbiso::branch_create(&branch_name, &cwd).await.ok()
-        } else {
-            None
+    // DB isolation — decided WITHOUT touching Docker. When the workspace has a
+    // registered base image, the database branch is created in the BACKGROUND
+    // and delivered into the live session once it's up (see the task after the
+    // registry insert). Blocking the PTY spawn on a container create + postgres
+    // readiness probe froze main-branch session opens: worktree cwds never
+    // match the registered workspace path, so only root sessions paid it.
+    let db_pending = db_isolation.unwrap_or(false)
+        && dbiso::get_current_base_image(&cwd).is_some();
+
+    // The agent invocation (shell-ready string), built once here so both the
+    // immediate path and the DB-deferred path share it. `None` = plain terminal.
+    let agent_invocation: Option<String> = command.as_ref().map(|agent_exe| {
+        // Agent session: build the full agent invocation as a string, then run it inside
+        // an interactive shell with -NoExit / exec so the terminal stays alive after exit.
+        // All session/resume flags and the prompt are pre-assembled by the frontend and
+        // arrive in `args` — Rust only shell-quotes and joins them onto the binary name.
+        let mut parts: Vec<String> = vec![agent_exe.clone()];
+        if let Some(ref extra) = args {
+            for arg in extra {
+                if arg.contains(' ') || arg.contains('\'') || arg.contains('\n') {
+                    parts.push(quote_arg(arg));
+                } else {
+                    parts.push(arg.clone());
+                }
+            }
         }
-    } else {
-        None
-    };
+        parts.join(" ")
+    });
 
     // The environment ID must equal the session ID so isolation state and the
     // PTY session share one key. Cloned because `session_id` is used again after
@@ -4294,8 +4339,12 @@ async fn create_pty_session(
     // runs on a dedicated blocking thread so it never starves Tauri's bounded IPC
     // worker pool. `tauri::State` is not `Send`, so the registry insert happens
     // back on the async side *after* this completes. All owned params move in.
-    let db_branch_name_stored = db_branch.as_ref().map(|b| b.name.clone());
+    let db_branch_name_stored: Option<String> = None; // set by the background DB task
     let session_id_log = session_id.clone();
+    // The blocking closure consumes `cwd` and `agent_invocation` by move; the
+    // deferred DB task (spawned after the registry insert) needs its own copies.
+    let cwd_for_db = cwd.clone();
+    let invocation_for_db = agent_invocation.clone();
     let (session, reader) = tauri::async_runtime::spawn_blocking(move || {
         let pty_system = native_pty_system();
         let size = PtySize {
@@ -4309,55 +4358,29 @@ async fn create_pty_session(
         // Resolve the base program + argument list for the shell invocation.
         // The sandbox (if any) transforms these before the command is built.
         let shell = SHELL.get_or_init(resolve_shell).clone();
-        let (program, cmd_args): (String, Vec<String>) = if let Some(ref agent_exe) = command {
-            // Agent session: build the full agent invocation as a string, then run it inside
-            // an interactive shell with -NoExit / exec so the terminal stays alive after exit.
-            // All session/resume flags and the prompt are pre-assembled by the frontend and
-            // arrive in `args` — Rust only shell-quotes and joins them onto the binary name.
-            // Shell-quote each arg for the target interpreter. The escapes for a
-            // literal `'` inside a `'...'` string differ:
-            //   PowerShell → `''`  (doubled)
-            //   POSIX sh   → `'\''` (close, escaped literal, reopen)
-            // The previous `'''` worked for neither and blew up on prompts
-            // containing apostrophes (e.g. issue-body checklists like `I'm ...`).
-            #[cfg(windows)]
-            fn quote_arg(s: &str) -> String {
-                format!("'{}'", s.replace('\'', "''"))
-            }
-            #[cfg(not(windows))]
-            fn quote_arg(s: &str) -> String {
-                format!("'{}'", s.replace('\'', "'\\''"))
-            }
-            let mut parts: Vec<String> = vec![agent_exe.clone()];
-            if let Some(ref extra) = args {
-                for arg in extra {
-                    if arg.contains(' ') || arg.contains('\'') || arg.contains('\n') {
-                        parts.push(quote_arg(arg));
-                    } else {
-                        parts.push(arg.clone());
-                    }
-                }
-            }
-            let agent_invocation = parts.join(" ");
-
+        let (program, cmd_args): (String, Vec<String>) = if command.is_some() && !db_pending {
+            // Agent session: run the prebuilt invocation inside an interactive
+            // shell with -NoExit / exec so the terminal stays alive after exit.
+            let invocation = agent_invocation.clone().unwrap_or_default();
             #[cfg(windows)]
             {
                 (shell.clone(), vec![
                     "-NoLogo".into(),
                     "-NoExit".into(),
                     "-Command".into(),
-                    agent_invocation,
+                    invocation,
                 ])
             }
             #[cfg(not(windows))]
             {
-                (shell.clone(), agent_shell_args(agent_invocation))
+                (shell.clone(), agent_shell_args(invocation))
             }
         } else {
-            // Bare shell session
+            // Bare shell session — also the DB-deferred case: the agent is
+            // launched later by writing its line into this live shell.
             #[cfg(windows)]
             {
-                (shell.clone(), Vec::new())
+                (shell.clone(), vec!["-NoLogo".into(), "-NoExit".into()])
             }
             #[cfg(not(windows))]
             {
@@ -4467,21 +4490,13 @@ async fn create_pty_session(
         #[cfg(not(windows))]
         cmd.env("TERM", "xterm-256color");
 
-        // Project env from tempest.yml. Applied before the DB block below so an
-        // isolated session's DATABASE_URL can never be shadowed by the repo.
+        // Project env from tempest.yml. The DB-isolated connection is NOT set
+        // here — it arrives later, written into the live shell by the
+        // background DB task, right before it launches the agent line.
         if let Some(ref extra) = env {
             for (k, v) in extra {
                 cmd.env(k, v);
             }
-        }
-
-        // Inject DB isolation env vars so agents see an isolated DATABASE_URL.
-        if let Some(ref b) = db_branch {
-            cmd.env("DATABASE_URL", &b.connection_string);
-            cmd.env("PGHOST", "127.0.0.1");
-            cmd.env("PGPORT", b.port.to_string());
-            cmd.env("PGUSER", "postgres");
-            cmd.env("PGDATABASE", "postgres");
         }
 
         let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
@@ -4609,6 +4624,47 @@ async fn create_pty_session(
 
     state.0.insert(session_id, Arc::new(session));
 
+    // DB-isolated session: the shell is already live. Create the database
+    // branch now — in the background — then write the connection env and, for
+    // agent sessions, the agent launch line into it. The agent inherits the
+    // env because it becomes a child of this same shell.
+    if db_pending {
+        let app = app.clone();
+        let sid = session_id.clone();
+        let cwd_defer = cwd_for_db;
+        let invocation_defer = invocation_for_db;
+        tauri::async_runtime::spawn(async move {
+            write_pty_bytes(&app, &sid, b"Preparing isolated database branch…\r\n");
+            match dbiso::branch_create(
+                &format!("tempest-{}", &sid[..8.min(sid.len())]),
+                &cwd_defer,
+            )
+            .await
+            {
+                Ok(b) => {
+                    let state = app.state::<PtyState>();
+                    let Some(sess_arc) = state.0.get(&sid).map(|r| Arc::clone(&*r)) else {
+                        // Session vanished while the branch was starting —
+                        // don't leak the container.
+                        let _ = dbiso::branch_delete(&b.name).await;
+                        return;
+                    };
+                    *sess_arc.db_branch_name.lock().unwrap() = Some(b.name.clone());
+                    drop(state);
+                    let script = db_delivery_script(&b, invocation_defer.as_deref());
+                    write_pty_bytes(&app, &sid, script.as_bytes());
+                }
+                Err(e) => {
+                    write_pty_bytes(
+                        &app,
+                        &sid,
+                        format!("Isolated database branch failed: {e}\r\n").as_bytes(),
+                    );
+                }
+            }
+        });
+    }
+
     Ok(())
 }
 
@@ -4623,6 +4679,54 @@ fn write_to_pty(
         session.writer.lock().unwrap().write_all(&data).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Write raw bytes into a live PTY from the Rust side — the same write the
+/// `write_to_pty` command performs, usable inside spawned tasks via
+/// `AppHandle`. Returns false when the session is gone or the write failed.
+fn write_pty_bytes(app: &tauri::AppHandle, session_id: &str, data: &[u8]) -> bool {
+    let state = app.state::<PtyState>();
+    let Some(session_arc) = state.0.get(session_id).map(|r| Arc::clone(&*r)) else {
+        return false;
+    };
+    session_arc
+        .writer
+        .lock()
+        .unwrap()
+        .write_all(data)
+        .is_ok()
+}
+
+/// The line(s) written into a live DB-isolated session once its database
+/// branch is up: the connection env plus — for agent sessions — the agent
+/// launch itself, so the CLI inherits the isolated connection.
+fn db_delivery_script(b: &dbiso::DbBranch, invocation: Option<&str>) -> String {
+    #[cfg(windows)]
+    {
+        let esc = |s: &str| s.replace('\'', "''");
+        let mut s = format!(
+            "$env:DATABASE_URL = '{}'\r\n$env:PGHOST = '127.0.0.1'\r\n$env:PGPORT = '{}'\r\n$env:PGUSER = 'postgres'\r\n$env:PGDATABASE = 'postgres'\r\n",
+            esc(&b.connection_string),
+            b.port
+        );
+        if let Some(inv) = invocation {
+            s.push_str(&format!("{inv}\r"));
+        }
+        s
+    }
+    #[cfg(not(windows))]
+    {
+        let esc = |s: &str| s.replace('\'', "'\\''");
+        let mut s = format!(
+            "export DATABASE_URL='{}'\nexport PGHOST='127.0.0.1'\nexport PGPORT='{}'\nexport PGUSER='postgres'\nexport PGDATABASE='postgres'\n",
+            esc(&b.connection_string),
+            b.port
+        );
+        if let Some(inv) = invocation {
+            s.push_str(&format!("{inv}\n"));
+        }
+        s
+    }
 }
 
 #[tauri::command]
