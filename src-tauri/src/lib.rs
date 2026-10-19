@@ -4623,6 +4623,7 @@ async fn create_pty_session(
         }
     });
 
+    let sid_after_insert = session_id.clone();
     state.0.insert(session_id, Arc::new(session));
 
     // DB-isolated session: the shell is already live. Create the database
@@ -4631,7 +4632,7 @@ async fn create_pty_session(
     // env because it becomes a child of this same shell.
     if db_pending {
         let app = app.clone();
-        let sid = session_id.clone();
+        let sid = sid_after_insert;
         let cwd_defer = cwd_for_db;
         let invocation_defer = invocation_for_db;
         tauri::async_runtime::spawn(async move {
@@ -4690,12 +4691,10 @@ fn write_pty_bytes(app: &tauri::AppHandle, session_id: &str, data: &[u8]) -> boo
     let Some(session_arc) = state.0.get(session_id).map(|r| Arc::clone(&*r)) else {
         return false;
     };
-    session_arc
-        .writer
-        .lock()
-        .unwrap()
-        .write_all(data)
-        .is_ok()
+    let mut writer = session_arc.writer.lock().unwrap();
+    let ok = writer.write_all(data).is_ok();
+    drop(writer);
+    ok
 }
 
 /// The line(s) written into a live DB-isolated session once its database
