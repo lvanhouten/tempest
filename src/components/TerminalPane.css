@@ -9,7 +9,7 @@
 
 .terminal-pane {
   flex: 1;
-  padding: 8px;
+  margin: 8px;
   box-sizing: border-box;
   overflow: hidden;
   min-height: 0;
