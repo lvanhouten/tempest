@@ -29,7 +29,7 @@ Each workspace is completely isolated. One agent running in a workspace cannot s
     Provide a name for your workspace. Optionally add a prompt that will be sent to the agent when the session launches.
   </Step>
   <Step title="Select session type">
-    Choose between running a terminal session or launching an agent (Claude Code, Aider, OpenCode, etc.).
+    Choose between running a terminal session or launching an agent (Claude Code, Codex CLI, Gemini CLI, and more — see [Supported Agents](/agents/supported)).
   </Step>
   <Step title="Workspace created">
     Tempest creates the worktree and opens a session. You can now run code or start an agent.
@@ -92,11 +92,11 @@ project-root/
 
 ### Session Persistence
 
-Workspace sessions are persisted in browser storage (localStorage) and survive app restarts. When you reopen Tempest:
+Workspace sessions are persisted to the local SQLite database (`tempest.db` in the app data dir) and survive app restarts. When you reopen Tempest:
 
-- Terminal workspaces reopen to where they left off
+- Terminal workspaces reopen to where they left off, with scrollback restored from ring buffers
 - Agent workspaces resume via stored conversation IDs, so the agent can continue where it stopped
-- The entire workspace state (including scrollback history) is preserved
+- The entire workspace state is preserved
 
 Session data includes:
 
@@ -104,7 +104,7 @@ Session data includes:
 - Current git branch
 - Agent configuration (if running an agent)
 - Conversation ID for resuming agent sessions
-- Terminal scrollback buffer (kept in memory)
+- Terminal scrollback, replayed from in-memory ring buffers when the pane reattaches
 
 ### Worktree Metadata
 

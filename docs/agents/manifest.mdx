@@ -1,0 +1,187 @@
+---
+title: "Agent Manifest Reference"
+description: "The agents.json schema, placeholder substitution, capture specs, and the signed distribution channel."
+icon: "file-code"
+---
+
+# Agent Manifest Reference
+
+Every agent Tempest can launch is described by a JSON entry in [`config/agents.json`](https://github.com/tempestai-dev/tempest/blob/main/config/agents.json). It is the single source of truth for the agent list — there is no hardcoded roster. The same entries drive the New Session menu, the [Automations](/automations/overview) headless runner, the [Chat pane](/chat/overview) bridges, and the agent-aware clear in the [Message Queue](/agents/overview#agent-aware-clear).
+
+This page documents the entry schema, how placeholders are substituted, and how the manifest reaches your install. For per-agent launch commands and troubleshooting, see [Supported Agents](/agents/supported); for how sessions consume the flags at spawn time, see [Agent System Overview](/agents/overview).
+
+## The bundled agents
+
+`config/agents.json` ships inside the app build and defines 16 agents:
+
+| `id` | Name | `id` | Name |
+|------|------|------|------|
+| `agy` | Antigravity | `hermes` | Hermes |
+| `claude` | Claude Code | `pi` | Pi |
+| `cline` | Cline | `amp` | Amp |
+| `codex` | Codex CLI | `fx` | fx |
+| `copilot` | Copilot CLI | `qwen` | Qwen Code |
+| `cursor` | Cursor Agent | `droid` | Droid |
+| `gemini` | Gemini CLI | `grok` | Grok |
+| `goose` | Goose | `opencode` | Opencode |
+
+Agents you add yourself under **Settings → Agents → Add** merge on top of this list (see [custom agents](/agents/overview)). They use the same schema with two extras: their `icon` may also be a `lucide:name` reference from the bundled icon set, and the entry is stamped `custom: true` so it stays freely editable and removable in the UI.
+
+## Entry schema
+
+The file has three top-level keys: `schema` (integer, currently `1`), `updatedAt` (an ISO date), and `agents` (the entry array). Each entry follows this shape:
+
+| Field | Description |
+|-------|-------------|
+| `id` | Stable key for the agent. An entry whose `id` matches a bundled agent **overrides** it: unspecified fields are inherited from the replaced agent, so you can rename or add a flag without re-supplying the icon or capture spec. |
+| `name` | Display name shown in the UI (e.g., `"Claude Code"`). |
+| `command` | The CLI invocation. Must match `^[A-Za-z0-9_.-]+( [A-Za-z0-9_.-]+)*$` — a bare token (`claude`) or a short space-separated form (`gh copilot`), with no shell metacharacters. The command reaches the shell unquoted, so this pattern keeps a typo from becoming shell injection. |
+| `adapter` | Execution model. Only `"cli"` is accepted — an agent that needs a new session or capture model requires a bundled adapter shipped in the app, because the manifest can only reference adapters the signed app already contains. |
+| `mono` | `true` when the icon is a monochrome SVG; the renderer inverts it in dark mode. |
+| `icon` | A bundled-asset key (e.g., `"claude"`) or a file committed to `config/agent-icons/` (e.g., `"amp.svg"`), a bare filename with no scheme or slash so an icon can never point at a third-party host. Omit it and the agent renders a generic fallback glyph. |
+| `downloadUrl` | Where to get the CLI when it is not on PATH. https only. |
+| `minAppVersion` | Optional. An entry is ignored on apps older than the named version. |
+| `clearCommand` | The REPL command that resets the agent's conversation context (e.g., `"/clear"` for Claude Code, `"/new"` for Codex CLI). The Message Queue's add-clear chip sends it. Bounded to 64 printable ASCII characters; omit it and the chip is hidden. |
+| `flags` | Structured flag templates, grouped by purpose. See below — every group is optional. |
+| `capture` | A session-id capture spec for agents that print their own id. See below. |
+
+### Flags
+
+| Group | Placeholder | Applied |
+|-------|-------------|---------|
+| `session` | `{UUID}` — a freshly minted session id | First spawn, to establish an addressable session. Requires a CLI that accepts an id **you** supply. |
+| `resume` | `{UUID}` — the stored conversation id | Reopening a saved session. |
+| `model` | `{MODEL}` — the chosen model | Must actually carry `{MODEL}`, or the model choice is silently dropped. |
+| `autoApprove` | none | Only when the user's local **Auto-approve agent tool calls** setting is on. The manifest supplies the flag syntax; the app decides application, so a manifest can never force Auto on. |
+| `print` | `{PROMPT}` — the prompt text | Headless, one-shot runs. Required for [Automations](/automations/overview); an interactive-only agent cannot receive a prompt without a TTY. |
+
+### Capture
+
+Some agents mint their own session id and print it to output instead of accepting one. For those, `capture` supplies:
+
+| Field | Description |
+|-------|-------------|
+| `pattern` | Regex source that pulls the id out of raw output; a capture group holds the id. Capped at 2000 characters. |
+| `flags` | Optional regex flags, restricted to the standard set (`gimsuy`). |
+| `resume` | Flags used once the id is captured, with `{UUID}` substituted for it. |
+
+The spawn path requires both a compiled pattern **and** resume args, so a capture spec without `resume` does nothing.
+
+## Placeholder substitution
+
+Substitution happens on every flag group. The known placeholders:
+
+| Placeholder | Replaced with |
+|-------------|---------------|
+| `{UUID}` | New session id on first spawn; stored conversation id in `resume` and `capture.resume` |
+| `{MODEL}` | The chosen model |
+| `{PROMPT}` | The prompt text in `print` runs |
+| `{WORKSPACE_ID}` | The session id, as a workspace-scoped identifier |
+| `{WORKSPACE_NAME}` | The workspace name |
+| `{WORKSPACE_SLUG}` | The workspace name, slugified |
+| `{WORKSPACE_PATH}` | The session's working directory |
+| `{BRANCH}` | The session's git branch |
+| `{PORT}` | The session's port, when one is set |
+
+An **unknown** placeholder is the one failure mode worth knowing about: there is no substitution lookup for it, so it passes through verbatim and reaches the CLI as a literal string. A typo like `{UID}` in a commit is therefore silent at runtime — which is why `src/lib/agentsManifestFile.check.ts` rejects unknown placeholders at check time ([validation](#validation) below).
+
+## Flag semantics and traps
+
+Two conventions trip up new manifest entries, and both are guarded in the checks:
+
+- **`autoApprove` applies to the interactive spawn as well as the headless one.** A flag that only exists on a headless subcommand — Droid's `--auto` is the shipped example, Crush's `--yolo` the other — breaks every launch of that agent the moment the user turns Auto on. Droid's entry therefore ships without `autoApprove`, and the guard in `agentsManifestFile.check.ts` rejects a well-meaning "add the yolo flag" edit that would reintroduce it.
+- **`session` needs a CLI that accepts an id we supply.** A `--resume` flag that only takes an id the CLI minted itself belongs in `capture.resume` instead, or nowhere — declaring it under `flags.session` passes Tempest's id to a CLI that does not expect it.
+
+## The signed distribution channel
+
+The manifest travels on two layers:
+
+1. **The bundled floor.** `config/agents.json` is imported at build time, so the agent list works instantly and offline, even before any network call.
+2. **The signed remote patch.** At startup, `src/lib/remoteAgents.ts` fetches both `agents.json` and its detached signature `agents.json.minisig` from
+
+   ```
+   https://cdn.jsdelivr.net/gh/tempestai-dev/tempest@main/config/
+   ```
+
+   and verifies the signature in Rust via the `verify_minisign` command against `AGENTS_PUBKEY`, the public key bundled in `src-tauri/src/lib.rs` (the `minisign-verify` crate; both legacy and prehashed signature formats are accepted). Only after verification is the raw file parsed, the `minAppVersion` gate applied, and the surviving entries merged by `id` onto the floor. A new agent added upstream via a PR shows up in existing installs this way — no app release needed.
+
+<Callout type="warning">
+  Why is this the one signed file? Every entry carries a `command` that gets spawned and reaches a shell unquoted, plus the `autoApprove` flag that disables an agent's own sandbox. An unsigned channel — reachable by a repo write, a merged PR, or a CDN cache-poisoning attack — would turn any of those into remote command execution on every client. On any verification failure the app keeps only its bundled agents; the fetch is deliberately silent about failures, because the bundled list already works.
+</Callout>
+
+Icon references are resolved two ways: bundled keys resolve to local assets, while file references are downloaded from Tempest's own repo through jsDelivr and cached as data URLs so they survive offline starts (never a third-party host).
+
+### Key ceremony and publishing
+
+<Steps>
+  <Step>
+    **Generate a signing key pair** with `minisign -G -p tempest-agents.pub -s tempest-agents.key`. Keep the private key offline or as a CI secret.
+  </Step>
+  <Step>
+    **Embed the public key.** Paste the `RW…` line from `tempest-agents.pub` into `AGENTS_PUBKEY` in `src-tauri/src/lib.rs` and ship it in a release — the key is bundled in the app. While `AGENTS_PUBKEY` is empty, the channel stays disabled and apps use only bundled agents.
+  </Step>
+  <Step>
+    **Sign and publish updates** with `minisign -S -s tempest-agents.key -m config/agents.json`, which produces `config/agents.json.minisig`. Commit both files and push; clients verify and pick the update up on next startup, after the ~12h jsDelivr cache TTL or a cache purge.
+  </Step>
+</Steps>
+
+At the repo root, the helper script `sign-agents.ps1` performs the ceremony in one shot: it signs the manifest, verifies the result before committing anything, commits and pushes, then purges the jsDelivr cache for both files so clients see the update immediately.
+
+### The other config files, for contrast
+
+<CardGroup cols={3}>
+  <Card title="agents.json" icon="file-code">
+    Fetched at runtime and **minisign-verified**. Carries spawned commands and flag templates — the only file that does.
+  </Card>
+  <Card title="models.json" icon="list-ol">
+    Fetched at runtime but **unsigned**. Pure display data (model ids, labels, context sizes); nothing here is executed. See [Chat models](/chat/models).
+  </Card>
+  <Card title="providers.json" icon="shuffle">
+    **Never fetched.** Provider presets rewrite an API base URL and name the variable a key is exported into, so they ship bundled with each release — see [provider presets](/agents/supported#provider-presets).
+  </Card>
+</CardGroup>
+
+## Validation
+
+`src/lib/agentsManifestFile.check.ts` runs under `npm test` and asserts things about the shipped file that are invisible at runtime. A malformed entry is dropped **silently** — the correct behavior for an untrusted downloaded manifest — which otherwise looks exactly like "my agent never showed up". The checks make it a build failure instead:
+
+- every shipped entry survives sanitization (a dropped entry is an agent that silently never appears);
+- agent ids are unique;
+- every `command` is a bare-token regex match, and every name is non-empty;
+- each `icon` resolves either to a bundled key or to a real file in `config/agent-icons/` (anything else degrades to the fallback glyph with no error);
+- capture patterns compile, and every capture spec carries resume args so it is usable;
+- every placeholder is a known one, since a typo reaches the CLI literally;
+- `modelArgs` actually reference `{MODEL}` and `printArgs` reference `{PROMPT}`, so slots that carry a value carry its placeholder;
+- `downloadUrl` is https;
+- and Droid's entry must not declare `autoApprove`, because its `--auto` flag is exec-only and would break interactive launches.
+
+## Worked example
+
+A complete entry for a new resumable agent:
+
+```jsonc
+{
+  "id": "myagent",                 // stable key; also overrides a bundled agent of the same id
+  "name": "My Agent",
+  "command": "myagent",            // bare token, or a few e.g. "gh copilot"
+  "adapter": "cli",                // only "cli" is accepted
+  "icon": "myagent.svg",           // a file in config/agent-icons/, or a bundled key
+  "mono": true,                    // monochrome icon → inverted in dark mode
+  "downloadUrl": "https://…",      // https only; shown when the CLI isn't on PATH
+  "clearCommand": "/clear",        // REPL command the Message Queue's clear button sends
+  "flags": {
+    "session":     ["--session-id", "{UUID}"],  // first run; an id WE supply
+    "resume":      ["--resume", "{UUID}"],      // resuming a stored conversation
+    "model":       ["--model", "{MODEL}"],
+    "autoApprove": ["--yolo"],                  // applied only when the user's Auto is on
+    "print":       ["-p", "{PROMPT}"]           // headless; required for automations
+  },
+  "capture": {                     // only for agents that print their OWN session id
+    "pattern": "([0-9a-f-]{36})",
+    "flags": "i",
+    "resume": ["-s", "{UUID}"]
+  }
+}
+```
+
+Add the icon to `config/agent-icons/`, verify each flag against the CLI's own `--help`, run `npm test`, and — because the channel is signed — expect the entry to reach existing installs once a key holder regenerates `config/agents.json.minisig` (or ship it in the bundled floor with the next release). Status detection options, including lifecycle hooks, are covered in [Lifecycle hooks](/agents/hooks).

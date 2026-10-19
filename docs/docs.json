@@ -41,7 +41,7 @@
     "groups": [
       {
         "group": "Getting Started",
-        "pages": ["index", "installation", "quickstart", "keyboard-shortcuts", "architecture"]
+        "pages": ["index", "installation", "quickstart", "keyboard-shortcuts", "architecture", "glossary", "troubleshooting"]
       },
       {
         "group": "Workspaces",
@@ -49,11 +49,11 @@
       },
       {
         "group": "Agents",
-        "pages": ["agents/overview", "agents/supported"]
+        "pages": ["agents/overview", "agents/supported", "agents/manifest", "agents/hooks"]
       },
       {
-        "group": "Chat",
-        "pages": ["chat/overview"]
+        "group": "Chat & Threads",
+        "pages": ["chat/overview", "threads/overview", "chat/models"]
       },
       {
         "group": "Tasks",
@@ -72,6 +72,18 @@
         "pages": ["terminal/overview"]
       },
       {
+        "group": "Security & Isolation",
+        "pages": ["security/overview", "database-branches/overview"]
+      },
+      {
+        "group": "Mobile",
+        "pages": ["mobile/overview"]
+      },
+      {
+        "group": "Configuration",
+        "pages": ["tempest-yml"]
+      },
+      {
         "group": "Token Intelligence",
         "pages": ["token-intelligence/overview", "token-intelligence/mcp", "token-intelligence/context-compression"]
       },
@@ -81,7 +93,7 @@
       },
       {
         "group": "Settings",
-        "pages": ["settings/api-keys"]
+        "pages": ["settings/api-keys", "settings/reference"]
       },
       {
         "group": "Themes",

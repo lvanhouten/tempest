@@ -18,27 +18,17 @@ The NewSessionMenu is a context menu that appears when you click the "New Sessio
 
 2. **Agent Session** - A submenu that expands to show available coding agents. Hovering over this item reveals a list of agents you can run.
 
-3. **Chat** - Currently disabled and labeled "Coming soon". This will allow conversational chat sessions in the future.
-
-4. **Live Preview** - Opens an embedded browser for your dev server. This button is disabled (`disabled={!onLivePreview}`) if no dev server is running or if the feature is unavailable.
+The menu offers terminal and agent sessions only. Conversational chat lives on the Threads canvas — see [Threads](/threads/overview).
 
 ### Agent Picker
 
-Hovering over "Agent Session" reveals a submenu containing all available agents:
+Hovering over "Agent Session" reveals a submenu containing every agent in the registry. The bundled manifest (`config/agents.json`) ships 16 agents:
 
-1. **Claude Code** - The official Claude Code CLI agent. Supports session resuming via `--resume {UUID}`. Starts with `--session-id {UUID}` to track the session.
+`agy` (Antigravity), `claude`, `cline`, `codex`, `copilot`, `cursor`, `gemini`, `goose`, `opencode`, `hermes`, `pi`, `amp`, `fx`, `qwen`, `droid`, and `grok`.
 
-2. **Gemini CLI** - Google's Gemini command-line agent. Also supports session IDs for resuming.
+Each entry declares how the agent is launched, tracked, and resumed. For example, Claude Code spawns with `--session-id {UUID}` and resumes with `--resume {UUID}`. Agents that manage sessions internally rather than through launch flags can declare a capture pattern so Tempest can extract a session ID from their output for later resuming.
 
-3. **Opencode** - OpenInterpreters opencode tool. Does not support session IDs in arguments; instead, it prints its session ID to stdout, which is captured by a regex pattern (`/\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/i`) for later resuming with `-s {UUID}`.
-
-4. **Copilot CLI** - GitHub's Copilot command-line tool. No built-in session support.
-
-5. **Cline** - A monochrome agent icon. No session resuming.
-
-6. **Cursor Agent** - Anysphere's Cursor agent. Monochrome icon. No session resuming.
-
-7. **Goose** - The goose agent. Monochrome icon. No session resuming.
+You can add your own agents in Settings → Agents; user-added agents are merged over the bundled manifest. See [Supported agents](/agents/supported).
 
 ### Agent Configuration
 
@@ -259,12 +249,19 @@ The left side of the panel lists all settings sections:
 - Terminal
 - Git
 - Token Intelligence
+- Security
+- Mobile (beta badge)
+- Agents
+- API Keys
 - Prompts
-- Keyboard
+- Keybindings
+- Attribution
+- Experimental
 
 **Help section:**
-- Attribution
 - About
+
+The Agents section covers agent availability and user-added agents; API Keys holds the provider keys used for BYOK chat (see [API Keys](/settings/api-keys)).
 
 Clicking a section button navigates to that section. The active section is highlighted.
 
@@ -287,7 +284,7 @@ Each theme card displays:
 Customize how the embedded terminal looks and behaves.
 
 - `Font size` - Stepper from 10px to 20px
-- `Font family` - Dropdown menu with options like "Monospace", "Courier New", etc.
+- `Font family` - Dropdown with Geist Mono, JetBrains Mono, Fira Code, Cascadia Code, Consolas, Menlo, and the system `monospace` fallback.
 - `Cursor style` - Segmented control with three options: "Block", "Bar", "Line"
 - `Cursor blink` - Toggle switch to enable/disable cursor blinking
 - `Scrollback` - Number input for the number of lines to keep in terminal history (100-50,000 lines, default often 1000)
@@ -379,7 +376,7 @@ Disabling removes it automatically.
 
 Shows:
 - Brief description: "A focused workspace for agentic development."
-- Version: "0.1.0"
+- Version: the installed app version, read dynamically at runtime
 - Built with: "Tauri · React · TypeScript"
 
 ### UI Components
@@ -402,21 +399,18 @@ All settings are stored in the app's state store:
 - Terminal and sidebar font sizes are user preferences
 - Git configuration (branch prefix, commit message) applies to all new sessions
 - Prompts are stored per user and persist across app restarts
-- Keybindings are stored in a JSON file and reloaded on startup
+- Keybindings are stored in runtime state (the app_state "runtime" row in SQLite) and reloaded on startup
 - Attribution state is a simple boolean flag
 
 Changes are saved immediately when you adjust a setting.
 
-## DeleteDialog (Implicit)
+## DeleteWorkspaceDialog
 
-While not shown in the source code examples, Tempest likely has a DeleteDialog for confirming destructive actions. Based on the codebase patterns, it would:
+DeleteWorkspaceDialog (`src/components/WorkspaceView/DeleteWorkspaceDialog.tsx`) is the two-step confirmation dialog for removing a workspace:
 
-- Show a clear warning about what will be deleted
-- Require explicit confirmation (usually two-click pattern or typed confirmation)
-- Display the item(s) to be deleted
-- Provide Cancel and Delete buttons
+- **Step 1**: Confirm worktree deletion; optional checkbox to also delete the git branch.
+- **Step 2** (if deleting the branch): Confirm branch deletion.
+- **Loading state**: Shows a spinner while the async delete runs.
+- **Error display**: Surfaces errors if the operation fails.
 
-Common delete scenarios in Tempest:
-- Deleting a saved prompt (custom prompts only; built-in cannot be deleted)
-- Clearing all messages from the queue
-- Removing a session tab
+DiffPane ships two sub-dialogs of its own: DiscardFileDialog, which confirms discarding the changes in a single file, and DeleteBranchDialog, which confirms branch deletion.

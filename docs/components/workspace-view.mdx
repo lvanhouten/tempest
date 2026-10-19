@@ -6,7 +6,7 @@ icon: "window"
 
 # WorkspaceView Component
 
-The **WorkspaceView** component is the heart of Tempest's desktop application. At 2,646 lines, it serves as the primary container managing a single agent session workspace, coordinating tabs, panes, sessions, and user interactions. It orchestrates everything from terminal spawning to diff rendering to live preview hosting.
+The **WorkspaceView** component is the heart of Tempest's desktop application. At roughly 2,600 lines, it serves as the primary container managing a single agent session workspace, coordinating tabs, panes, sessions, and user interactions. It orchestrates everything from terminal spawning to diff rendering to live preview hosting.
 
 ## Overview
 
@@ -27,6 +27,8 @@ interface Props {
 }
 ```
 
+The zen entry point is currently disabled in the UI — the TopBar button is labeled "coming soon". The underlying window support exists, but zen mode is not reachable today.
+
 ## Data Model
 
 ### Session Interface
@@ -37,7 +39,7 @@ interface Session {
   name: string;                        // Display name (worktree branch or custom)
   cwd: string;                         // Working directory path
   projectId: string;                   // Parent project UUID
-  kind?: "terminal" | "diff" | "preview" | "editor"; // Tab type (defaults to "terminal")
+  kind?: "terminal" | "diff" | "preview" | "editor" | "thread"; // Tab type (defaults to "terminal")
   previewUrl?: string;                 // Current URL for preview tabs
   agent?: string;                      // CLI command (e.g. "claude")
   conversationId?: string;             // Claude conversation UUID for resuming
@@ -46,7 +48,7 @@ interface Session {
   isRootSession?: boolean;             // true when running in project root (no worktree)
   noGit?: boolean;                     // true when user skipped git init for root session
   parentSessionId?: string;            // Set when spawned via split
-  storeKey?: string;                   // localStorage key for persistence
+  storeKey?: string;                   // Key under which the session store persists this session
   metadata: {
     resumeCount: number;               // How many times this session has resumed
     hasBeenResumed: boolean;
@@ -81,9 +83,10 @@ WorkspaceView supports multiple tab types, each rendered by a dedicated pane:
 | `diff` | `DiffPane` | Git status, staging, commit, push operations |
 | `preview` | `PreviewPane` | Live preview of dev server (Vite, Next.js, etc.) |
 | `editor` | `CodeMirrorPane` | Read/edit files with syntax highlighting |
+| `thread` | `ThreadsView` | Threads canvas: chat, agent, terminal, file, and media nodes on a spatial canvas |
 | Agent session | `TerminalPane` | Terminal running an agent CLI (Claude, Opencode, etc.) |
 
-Tabs are displayed in a horizontal tab bar at the top of the workspace. Only one tab is active at a time unless split panes are enabled. Terminal and agent tabs are persisted across restarts; diff/preview/editor tabs are transient.
+Tabs are displayed in a horizontal tab bar at the top of the workspace. Only one tab is active at a time unless split panes are enabled. All tab kinds persist across restarts: terminal and agent sessions are restored from the SQLite sessions table, while diff/preview/editor tabs are restored from the tabs table.
 
 ## State Management
 
@@ -104,7 +107,7 @@ WorkspaceView uses over 50 `useState` hooks managing:
 - `paneRects`: Computed absolute positions for each pane
 
 ### Navigation
-- `activeSection`: "overview" | "nexus" (main page when no tab active)
+- `activeSection`: "overview" | "knowledge-base" | "tasks" | "automations" (main page when no tab active)
 - `sidebarOpen`: Left sidebar visibility
 - `rightSidebarOpen`: Right sidebar visibility
 
@@ -117,7 +120,7 @@ WorkspaceView uses over 50 `useState` hooks managing:
 
 ### Project Management
 - `projects`: Array of projects (default mode only)
-- `zenWorktrees`: Worktree list for zen mode
+- `zenWorktrees`: Worktree list for zen mode (mode currently disabled in the UI)
 
 ### UI State
 - `settingsOpen`, `broadcastOpen`, `promptPickerOpen`: Modal states
@@ -196,12 +199,12 @@ Only terminal panes can be split. Diff/preview/editor tabs do not support splitt
 `openSession()` is called from multiple paths: user clicks "New Workspace", restore loop, split pane. The function:
 
 1. Mints or reuses a stable `instanceId` for persistence
-2. Determines the storage key (`storeKey`): root sessions use `rootSessionKey(cwd, sessionId)`, worktree agents key on `cwd`
+2. Upserts the session into the session store, keyed by a stable id so restore can match it after a restart
 3. Builds agent arguments via `buildAgentArgs()`: session/resume flags + prompt
 4. Calls `invoke("create_pty_session")` → Rust PTY spawns
 5. Registers with SessionManager, which owns the Channel and runs work-done detection
 6. Adds to `sessions` state, making it appear as a tab
-7. Persists metadata to localStorage
+7. Flushes session metadata to the SQLite `sessions` table
 
 **Deduplication**: During restore (dedupe=true), the function guards against duplicate spawns at the same cwd using `spawningPaths` ref.
 
@@ -234,7 +237,7 @@ config.resumeArgs?.forEach(arg => {
 
 1. Recursively closes all sub-sessions (spawned via split)
 2. Kills the PTY: `invoke("close_pty_session", {sessionId})`
-3. Marks persisted entry as closed: `markWorktreeSessionClosed(storeKey)`
+3. Marks the persisted session as closed in the session store
 4. Unregisters from SessionManager
 5. Removes from pane layout tree if in split mode
 6. Clears work state badge
@@ -271,12 +274,11 @@ const WorkStateBadge = memo(function WorkStateBadge({ sessionId }) {
 On mount, WorkspaceView restores all previously open sessions in saved order:
 
 1. **Discover valid paths**: Scan each project's `.tempest/` for worktrees, add to `validPaths`
-2. **Mark root sessions as valid**: Retrieve all root session store keys (project.path + "::root::" + sessionId)
-3. **Prune orphaned entries**: Delete persisted sessions whose paths no longer exist on disk
-4. **Collect restore items**: Build list from `sessionOrder` (tab bar order) + saved active session
-5. **Open in order**: Restore non-active sessions, then active session last so it gets focus
+2. **Prune orphaned entries**: Delete persisted sessions whose paths no longer exist on disk
+3. **Collect restore items**: Build the list from `sessionOrder` (tab bar order) plus the saved active session
+4. **Open in order**: Restore non-active sessions, then active session last so it gets focus
 
-Active session is determined by `activeInstanceId` from runtimeState, not the current active tab—ensures focus survives a reload.
+Active session is determined by `activeInstanceId` from the app_state "runtime" blob in SQLite, not the current active tab—ensures focus survives a reload.
 
 ## Keyboard Shortcuts
 
@@ -284,11 +286,13 @@ All shortcuts are registered in the capture phase (before xterm.js can consume).
 
 | Action | Default | Usage |
 |--------|---------|-------|
+| Command palette | Ctrl+Shift+P | Open the command palette |
 | Toggle theme | Ctrl+Shift+T | Switch light/dark |
 | Toggle left sidebar | Ctrl+B | Show/hide projects |
-| Toggle right sidebar | Ctrl+Shift+P | Show/hide file tree |
+| Toggle right sidebar | Ctrl+\ | Show/hide file tree |
 | Open settings | Ctrl+, | Settings panel |
-| New workspace | Ctrl+Shift+N | Open session menu |
+| Open project | Ctrl+O | Project switcher |
+| New workspace | Ctrl+N | Open session menu |
 | Close tab | Ctrl+W | Close active session |
 | Next tab | Ctrl+Tab | Move right in tab bar |
 | Prev tab | Ctrl+Shift+Tab | Move left in tab bar |
@@ -296,6 +300,9 @@ All shortcuts are registered in the capture phase (before xterm.js can consume).
 | Split horizontal | Ctrl+Shift+_ | Stacked panes |
 | Open queue | Ctrl+Shift+Q | Message queue panel |
 | Broadcast | Ctrl+Shift+M | Send to all agents |
+| Jump to waiting agent | Ctrl+Shift+A | Focus the next agent waiting for input |
+
+The rebindable actions and their defaults are defined in `src/store/keybindings.ts`; bindings are edited in Settings → Keybindings.
 
 Terminal's xterm.js custom key handler lets app shortcuts through even when focused.
 
@@ -313,19 +320,19 @@ Streams Atlas indexer output to the browser DevTools console for debugging.
 
 ## Persistence
 
-Three localStorage stores sync automatically:
+All workspace state is persisted to SQLite (tempest.db):
 
-1. **sessionOrder, activeInstanceId**: Via `setRuntimeState()`
+1. **Tab order and focus**: `sessionOrder` and `activeInstanceId` are saved into the app_state "runtime" blob via `setRuntimeState()`
    - Restores tab bar order and last active tab on launch
 
-2. **Per-session metadata**: Via `saveWorktreeSession(storeKey, {...})`
-   - name, agent, conversationId, instanceId, projectId, isRootSession, noGit
+2. **Per-session metadata**: The sessions table (via the sessions store)
+   - name, agent, conversationId, project, branch, noGit
 
-3. **Transient tabs (diff/preview/editor)**: Via `runtimeState.tabs` array
-   - Includes kind, cwd, projectId, previewUrl for preview tabs
+3. **Tool tabs (diff/preview/editor)**: The tabs table
+   - Includes kind, cwd, projectId, and previewUrl for preview tabs
 
-4. **Project list**: Via `saveOpenProjects()`
-   - Only default mode (not zen)
+4. **Project list**: The open projects store
+   - Projects and their cached worktrees
 
 ## Theme Integration
 
@@ -414,9 +421,9 @@ Two modes:
 - Worktree sessions (git branches with their own sessions)
 - Sub-sessions (spawned via split, indented with connecting lines)
 
-**Zen**: Flat list of worktrees for a single project. Useful for focused work on one codebase. Worktree session state persists but doesn't sync with sidebar—sidebar is always synced with disk.
+**Zen**: A single-project view with a flat worktree list. The entry point is currently disabled in the UI (the TopBar button reads "coming soon"); the underlying window support exists, but the mode is not reachable today.
 
-Both modes render sessions with icons: TerminalSquare for terminals, AgentIcon for agents, Eye/Globe/FileCode for diff/preview/editor tabs.
+Both modes render sessions with icons: a terminal glyph for terminals, the agent's branded icon for agent sessions, and diff/preview/editor glyphs for tool tabs.
 
 ## Future-Proofing
 

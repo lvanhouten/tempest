@@ -1,0 +1,148 @@
+---
+title: "tempest.yml"
+description: "Project-level configuration for security, environment, preview ports, and lifecycle hooks."
+icon: "settings-2"
+---
+
+# tempest.yml
+
+Tempest reads an optional `tempest.yml` (or `tempest.yaml`) at the project root when a workspace loads. Parsing never throws — a malformed file degrades with warnings instead of failing the load.
+
+## Full schema
+
+```yaml
+security:
+  sandbox:
+    mode: enforce        # off | monitor | enforce
+  network:
+    policy: restrictive  # permissive | restrictive
+    allowHosts: []
+    blockHosts: []
+  filesystem:
+    rwPaths: []
+    roPaths: []
+  permissions:
+    allowSkipPermissions: false
+    allowRepoHooks: false
+  agents:
+    permitted: []
+  database:
+    isolationEnabled: false
+  resources:
+    maxMemoryMb: 0
+    maxProcesses: 0
+    maxDiskWriteMb: 0
+    cpuWeight: 0
+
+instructions: ""         # free-text agent instructions
+
+env: {}                  # injected into the agent process environment
+
+preview:
+  port: 3000             # 1-65535; pins the dev-server port the Preview pane probes
+
+hooks:
+  setup: []              # run when worktrees are created
+  teardown: []           # run when worktrees are cleaned
+```
+
+## Keys
+
+### `security`
+
+The same shape as the Security sections in Project Settings — see [Security & Isolation](/security/overview) for what each layer does.
+
+### `instructions`
+
+A free-text string of agent instructions applied to sessions in this project.
+
+### `env`
+
+A map of variables injected into the agent process environment. The map is denylist-enforced: keys including `PATH`, `NODE_OPTIONS`, `LD_PRELOAD`, `DYLD_*`, `PYTHONPATH`, `DATABASE_URL`, and `PG*` are rejected with a warning.
+
+### `preview`
+
+`{ port }` — an integer from 1–65535 that pins the dev-server port the Preview pane probes.
+
+### `hooks`
+
+`setup` and `teardown`, each taking a single string or a list of them. These are shell commands run when [worktrees](/git/worktrees) are created (setup) or cleaned (teardown). Hooks are consent-gated by `permissions.allowRepoHooks`, stream output as `hook:{token}` events, run sequentially, and stop on the first failure.
+
+## Merge rules
+
+UI project settings and `tempest.yml` combine tightening-only:
+
+- The stricter sandbox mode wins.
+- A restrictive network policy wins.
+- `allowHosts` lists are intersected; `blockHosts` lists are unioned.
+- `rwPaths` and `roPaths` are intersected.
+- Permissions are only ever revoked, never granted.
+- Database isolation can be switched on but not off.
+- Resource quotas take the minimum.
+
+## Example
+
+A realistic file for a Node + Postgres project:
+
+```yaml
+security:
+  sandbox:
+    mode: enforce
+  network:
+    policy: restrictive
+    allowHosts:
+      - "**.github.com"
+      - "registry.npmjs.org"
+  permissions:
+    allowSkipPermissions: false
+    allowRepoHooks: true
+  database:
+    isolationEnabled: true
+  resources:
+    maxMemoryMb: 4096
+
+instructions: >-
+  Use pnpm, not npm. Run tests with pnpm test.
+  Generate migrations, never write them by hand.
+
+env:
+  NODE_ENV: development
+  LOG_LEVEL: debug
+
+preview:
+  port: 5173
+
+hooks:
+  setup:
+    - pnpm install
+  teardown:
+    - docker compose down
+```
+
+## Precedence
+
+Per-agent Environment settings and `tempest.yml` `env` both override provider presets.
+
+## Reference
+
+| Key | Type | What it controls |
+|-----|------|------------------|
+| `security.sandbox.mode` | enum | Sandbox strength: `off`, `monitor`, or `enforce` |
+| `security.network.policy` | enum | `permissive` or `restrictive` |
+| `security.network.allowHosts` | string list | Hosts the session may reach |
+| `security.network.blockHosts` | string list | Hosts always blocked — beats `allowHosts` |
+| `security.filesystem.rwPaths` | string list | Paths the session may write |
+| `security.filesystem.roPaths` | string list | Paths the session may only read |
+| `security.permissions.allowSkipPermissions` | boolean | Whether agents may use skip-permission flags |
+| `security.permissions.allowRepoHooks` | boolean | Consent for repo-defined hooks |
+| `security.agents.permitted` | string list | Agents allowed to launch in this project |
+| `security.database.isolationEnabled` | boolean | Per-session database branching |
+| `security.resources.maxMemoryMb` | number | Memory cap |
+| `security.resources.maxProcesses` | number | Process-count cap |
+| `security.resources.maxDiskWriteMb` | number | Disk-write quota — not yet enforced |
+| `security.resources.cpuWeight` | number | CPU rate weight |
+| `instructions` | string | Free-text agent instructions |
+| `env` | map | Extra env vars for the agent process — denylist-enforced |
+| `preview.port` | integer | 1–65535; dev-server port the Preview pane probes |
+| `hooks.setup` | string or list | Shell commands run when worktrees are created |
+| `hooks.teardown` | string or list | Shell commands run when worktrees are cleaned |

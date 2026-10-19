@@ -1,0 +1,154 @@
+---
+title: "Troubleshooting"
+description: "Fixes for the most common Tempest problems, gathered from across the docs."
+icon: "life-buoy"
+---
+
+# Troubleshooting
+
+Most Tempest problems fall into a small set of known shapes: a CLI that is not on `PATH`, a directory held open by another process, a pairing QR that expired. Start with the guide for the feature you are using, or jump straight to a quick fix below.
+
+<Callout type="info">
+Nothing here? Search [open issues](/contributing/issues) — and if a fix is missing from this page, [open a feature request](/contributing/feature-request) so it gets added.
+</Callout>
+
+## Feature guides
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Installers, build-from-source, and platform prerequisites.
+  </Card>
+  <Card title="Workspaces" icon="folder" href="/workspaces/creating">
+    Sessions and worktrees that fail to start.
+  </Card>
+  <Card title="Git worktrees" icon="git-branch" href="/git/worktrees">
+    Warm pool, junctions, and cleanup problems.
+  </Card>
+  <Card title="Agents" icon="robot" href="/agents/supported">
+    Bundled agents, PATH checks, and policy blocks.
+  </Card>
+  <Card title="Terminal" icon="terminal" href="/terminal/overview">
+    Rendering, scrollback, and restore issues.
+  </Card>
+  <Card title="Token Intelligence" icon="brain" href="/token-intelligence/overview">
+    Atlas indexing, daemons, and semantic search.
+  </Card>
+  <Card title="Database branches" icon="database" href="/database-branches/overview">
+    Docker, base images, and branch startup.
+  </Card>
+  <Card title="Mobile" icon="mobile-screen" href="/mobile/overview">
+    Pairing, transports, and remote control.
+  </Card>
+  <Card title="Themes" icon="palette" href="/themes/custom-themes">
+    Custom themes and theme variables.
+  </Card>
+  <Card title="Contributing" icon="wrench" href="/contributing/overview">
+    Building the repo and dev-environment issues.
+  </Card>
+</CardGroup>
+
+## Quick fixes
+
+Each entry gives the symptom, the usual cause, and the shortest fix. The link points at the page with full detail.
+
+### Agent never appears after spawn
+
+**Symptom:** You launch an agent and the terminal stays empty.
+
+**Cause:** One of three things — the agent CLI is not on your `PATH`, its entry in `config/agents.json` was invalid and dropped silently, or project policy blocks the agent.
+
+**Fix:** Work down the list:
+
+1. Confirm the CLI resolves outside Tempest:
+
+<Tabs>
+  <Tab title="Windows">
+    ```powershell
+    Get-Command claude
+    ```
+  </Tab>
+  <Tab title="macOS / Linux">
+    ```bash
+    which claude
+    ```
+  </Tab>
+</Tabs>
+
+2. Run `npm test` — it validates `config/agents.json`, so a silently dropped manifest entry shows up here. See [Supported agents](/agents/supported).
+3. Check **Project Settings → Permissions/Agents** and make sure the agent is permitted for this project.
+
+### Session lost after restart
+
+**Symptom:** A reopened tab shows an empty terminal after an app restart.
+
+**Cause:** Sessions persist in SQLite, but only agent sessions have their recent output restored from ring buffers. A plain terminal session keeps no scrollback, and conversation resumption only works for agents whose manifest declares `resumeArgs`.
+
+**Fix:** Nothing is corrupted — the output simply was not captured. Prefer agent sessions for work you may resume, and pick agents that declare `resumeArgs` when continuation matters. See [App state internals](/internals/state) and [Agents](/agents/overview).
+
+### "Database is locked" from Atlas
+
+**Symptom:** Atlas reports `database is locked`.
+
+**Cause:** Another process is indexing the same project. The index database runs in WAL mode, but a second writer can still collide with an active index run.
+
+**Fix:** Let the other process finish, or delete `<project>/.tempest/atlas` and re-index with `remove_atlas_index`. See [Token Intelligence](/token-intelligence/overview).
+
+<Warning>
+Deleting `.tempest/atlas` removes the index, not your code — the next index run rebuilds it from scratch.
+</Warning>
+
+### Worktree creation fails
+
+**Symptom:** Creating a session errors before an agent starts.
+
+**Cause:** A duplicate worktree name, an empty repository tree, or (on Windows) a directory held open by another process.
+
+**Fix:** Pick a different name. If the tree is empty, commit files first — Tempest rejects an empty checkout so agents never start in a blank repo. If a Windows directory is locked, close open sessions and retry; Tempest keeps a PID sidecar and can force-kill a locked worktree's processes. See [Worktrees](/git/worktrees).
+
+### Push fails
+
+**Symptom:** `git_push_current_branch` returns an error.
+
+**Cause:** No `origin` remote, a dirty tree, or no network.
+
+**Fix:** Add an `origin` remote, commit or clean your changes, and check connectivity, then push again. See [Push & PR](/git/push-pr).
+
+### DB branch never appears
+
+**Symptom:** The DB Clones panel stays empty after enabling database isolation.
+
+**Cause:** Docker is not running (`db_check_docker` reports this), the project's base image has not been built, or the connection string points at a pooler host, which forces the `pgdump` snapshot method.
+
+**Fix:** Start Docker, then build the base image in **Project Settings → Database**. See [Database branches](/database-branches/overview).
+
+### Phone won't pair
+
+**Symptom:** Scanning the QR code doesn't connect your phone.
+
+**Cause:** The QR expired — codes have a 60-second TTL — or the phone is trying a transport your network doesn't allow.
+
+**Fix:** Generate a fresh QR code and scan it promptly. If LAN pairing keeps failing, restart the relay with `TEMPEST_MOBILE_TRANSPORT=tunnel` to route through a Cloudflare tunnel. Admin rights and ETW tracing are not required for pairing. See [Mobile](/mobile/overview).
+
+### Semantic search unavailable
+
+**Symptom:** `atlas_semantic_search` is unavailable or returns nothing.
+
+**Cause:** The one-time ~25 MB embedding model has not been downloaded.
+
+**Fix:** In **Settings → Token Intelligence**, enable the semantic toggle; Tempest runs `download_atlas_model` and the model downloads once. See [Token Intelligence](/token-intelligence/overview).
+
+### Keybindings not applying
+
+**Symptom:** A keyboard shortcut does nothing or fires the wrong action.
+
+**Cause:** Overrides live in runtime state, and a `null` binding disables an action entirely — easy to set by accident.
+
+**Fix:** Open **Settings → Keybindings**, find the action, and reset it to the default. See [Keyboard shortcuts](/keyboard-shortcuts).
+
+### Theme reset after update
+
+**Symptom:** A custom theme disappears after updating Tempest.
+
+**Cause:** Themes are discovered from `src/themes/**/theme.json` at build time, so a custom theme must be re-added after an update. Your selection persists in runtime state — the theme file is what's missing.
+
+**Fix:** Re-add the theme under `src/themes/` and rebuild, then select it again. See [Custom themes](/themes/custom-themes).

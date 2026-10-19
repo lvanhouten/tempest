@@ -1,0 +1,63 @@
+---
+title: "Threads Canvas"
+description: "A spatial canvas where chats, notes, terminals, and agent sessions live as connected nodes — wiring one into another feeds it as context."
+icon: "workflow"
+---
+
+# Threads Canvas
+
+Threads is a spatial canvas, one per project, where chats, notes, terminals, and agent sessions live as connected nodes. Instead of stacking every conversation in a tab, you lay them out on a board and draw edges between them. The wiring is the context: anything connected to a chat node is addressable from that chat.
+
+Open the canvas from the threads toggle in the [sidebar](/components/sidebar). Each project keeps its own canvas.
+
+## Node kinds
+
+| Kind | What it is |
+|------|------------|
+| **chat** | An LLM or agent conversation node — see the [Chat pane](/chat/overview) |
+| **text** | A markdown note written directly on the canvas |
+| **agent** | An agent session placed on the canvas instead of the tab bar |
+| **terminal** | A PTY terminal placed on the canvas |
+| **file** | A wired-in file node whose contents feed context |
+| **image** | A wired-in image node |
+| **media** | A wired-in media node |
+| **site** | A live site node |
+| **collapsed** | A grouped subgraph — several nodes folded into one |
+
+## Edges feed context
+
+An edge between two nodes is a context wire. When file, image, media, or text nodes are wired into a chat node, their content becomes addressable from that chat — the model pulls it in through `read_canvas_node` instead of you pasting it by hand.
+
+While a node is generating, its edges animate, so you can see at a glance what is feeding what.
+
+## Layout
+
+Two ways to arrange the graph:
+
+- **Tidy** — one click runs a `cytoscape-fcose` force-directed pass in a worker, off the UI thread.
+- **Manual drag** — place any node wherever you like; the canvas never snaps back.
+
+## Context menu
+
+Right-click the canvas or a selection to:
+
+- **Convert selection to chat** — fold the highlighted nodes into a chat node that treats them as context
+- **Add nodes** — drop new chat, text, agent, terminal, or wired-in nodes at the pointer
+
+## Persistence
+
+The whole graph is stored in the Tempest SQLite database across four tables: `threads` (one per project canvas), `thread_nodes`, `thread_edges`, and `thread_messages`. Quit and reopen — the canvas comes back exactly as you left it.
+
+## Message Queue and sessions
+
+Canvas-placed agent and terminal sessions are ordinary Tempest sessions — they simply carry the placement `"canvas"`. The Message Queue treats them identically: enqueued prompts drain in order whether the session lives on the canvas or the tab bar.
+
+## Canvas vs tab bar
+
+| | Canvas | Tab bar |
+|--|--------|---------|
+| Best for | Multi-node workflows, notes next to runs, files feeding chats | One focused session at a time |
+| Context | Edges wire nodes together | Manual copy/paste |
+| Layout | Freeform and spatial | Linear tabs |
+
+A common rhythm: keep long agent runs in tabs, and use the canvas for planning — a chat node, a couple of notes, and wired-in files that keep the context connected.

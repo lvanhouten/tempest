@@ -23,7 +23,7 @@ Below the tabs, a context bar holds source-specific filters and a title search (
 - **Description** — the ticket body
 - **Comments** — pulled live from the source
 - **Activity** — timeline events (commits, state changes, label edits). GitHub "commented" events are filtered out here to avoid duplicating the Comments tab.
-- **Files** and **Checks** on PRs (stub tabs — not wired up yet)
+- **Files** and **Checks** on PRs — the PR's changed files and the CI check statuses on its head commit
 
 A right rail on the accordion shows Details and Labels. Row buttons: **Launch agent**, open in browser, copy link, close.
 
@@ -94,7 +94,7 @@ Task lists are cached in-process for 60 seconds to keep list navigation snappy. 
 
 The Rust backend exposes these Tauri commands (in `src-tauri/src/tasks.rs`):
 
-- `tasks_github_auth`, `tasks_github_repos`, `tasks_github_list`, `tasks_github_thread`
+- `tasks_github_auth`, `tasks_github_repos`, `tasks_github_list`, `tasks_github_thread`, `tasks_github_pr_files`, `tasks_github_pr_checks`
 - `tasks_linear_bootstrap`, `tasks_linear_list`, `tasks_linear_thread`
 - `tasks_cache_invalidate`
 

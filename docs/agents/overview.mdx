@@ -190,7 +190,7 @@ Agent sessions are identified by two IDs:
 
 ### Storage
 
-Sessions are persisted to browser localStorage under the `sessions` slice of the runtime state. Each session stores:
+Sessions are persisted in the SQLite sessions table (`tempest.db` in the app data dir) via runtime state. Each session stores:
 - `name`: Display name in the tab bar
 - `agent`: CLI command hint (e.g., "claude", "gemini")
 - `conversationId`: The persistent UUID for resumption
@@ -225,7 +225,7 @@ Steps:
 3. Invoke `create_pty_session` on the Rust backend
 4. Spawn the PTY in the target directory
 5. Stream output to the frontend via a Tauri Channel
-6. Save the session metadata to localStorage
+6. Save the session metadata to the sessions table
 7. Display the agent session in a new tab
 
 ### 2. Running (User Interacts)
@@ -266,7 +266,7 @@ User closes the tab
 Steps:
 1. Frontend calls `close_pty_session` on the Rust backend
 2. Rust terminates the PTY and all child processes
-3. Session is marked as `closed: true` in localStorage (soft deletion)
+3. Session is marked as `closed: true` in the sessions table (soft deletion)
 4. Tab is removed from the sidebar
 
 ## Broadcasting
@@ -326,7 +326,7 @@ The exact command comes from each agent's manifest (`clearCommand`):
 | Claude Code | `/clear` |
 | Codex CLI | `/new` |
 | Goose | `.clear` |
-| Gemini CLI, Aider, Opencode, others | `/clear` (fallback) |
+| Gemini CLI, Opencode, others | `/clear` (fallback) |
 
 The chip label updates to match the active agent (for example, "Add `/new`" for Codex sessions). Queued clear items render with a distinct style in the list so they're easy to spot among prompts.
 
@@ -355,7 +355,7 @@ The Rust PTY backend spawns the shell with `cwd` set to this directory, so agent
 ### Shell Selection
 
 Tempest automatically detects the default shell on first use:
-- **Windows**: Detects PowerShell 5.1 / PowerShell 7 / Command Prompt
+- **Windows**: Probes PowerShell 7 (`pwsh`), falling back to Windows PowerShell (`powershell.exe`)
 - **macOS/Linux**: Uses `$SHELL` environment variable, falls back to `/bin/bash`
 
 The shell is cached after the first detection, so all sessions use the same shell.
@@ -363,10 +363,13 @@ The shell is cached after the first detection, so all sessions use the same shel
 ### MCP Configuration
 
 If Token Intelligence (Atlas) is enabled, Tempest writes MCP server configuration to agent-specific files:
-- Claude Code: `.mcp.json`
+- Claude Code (also Cline, Roo, Zed, Windsurf): `.mcp.json`
 - Cursor: `.cursor/mcp.json`
 - Gemini CLI: `.gemini/settings.json`
-- Opencode: `opencode.json` or `opencode.jsonc`
+- Kiro: `.kiro/settings/mcp.json`
+- Opencode: `opencode.jsonc` (or `opencode.json` if it already exists)
+- Codex CLI: `~/.codex/config.toml` (global)
+- Goose: `~/.config/goose/profiles.yaml` (global)
 
 This allows agents to access Token Intelligence automatically without manual configuration.
 

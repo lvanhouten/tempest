@@ -1,0 +1,63 @@
+---
+title: "Database Branches"
+description: "Per-session PostgreSQL branches via Docker — agents run migrations and break data safely, on a disposable copy of your real database."
+icon: "database"
+---
+
+# Database Branches
+
+Each isolated session can get its own branched PostgreSQL 16 container, built from a base image of your real database. Agents run migrations, mutate rows, and generally break things — against a disposable copy that is deleted when the session closes.
+
+Session isolation itself is covered in [Security & Isolation](/security/overview).
+
+<Callout type="info">
+PostgreSQL only for now — MySQL and other engines are not supported.
+</Callout>
+
+## Requirements
+
+- Docker running locally
+- A PostgreSQL 16 engine
+- No port planning by hand — branch containers bind to `127.0.0.1` on an auto-assigned port
+
+## Building a base image
+
+In **Project Settings → Database**:
+
+1. Enable database isolation
+2. Provide the connection string to your real database
+3. Choose a snapshot method
+
+| Method | How it copies | Notes |
+|--------|---------------|-------|
+| **basebackup** | `pg_basebackup` — a physical copy | Most faithful |
+| **pgdump** | Logical dump and restore | Forced automatically for pooler hosts like `*.pooler.supabase.com` |
+| **schema-only** | Structure without data | Fastest, empty of rows |
+
+The build flow: Tempest spins up a staging container, runs `initdb`, imports the snapshot, prewarms with `ANALYZE` and `CHECKPOINT`, writes a tuned `postgresql.auto.conf` (`fsync=off`, `wal_level=minimal`, `shared_buffers=256MB`), and commits the result as an image named `tempest-db-base-<project>-<uuid>`.
+
+<Callout type="warning">
+The tuning trades durability for speed (`fsync=off`) on purpose — branches are disposable, so there is nothing worth crash-recovering.
+</Callout>
+
+## Branching per session
+
+When an isolated session starts, Tempest branches the base image into a container named `tempest-<branch>`. The host port is auto-assigned in the range 15432–65000 and bound to `127.0.0.1`. Readiness is confirmed with `pg_isready` before anything proceeds.
+
+## Env delivery
+
+The branch is wired into the session automatically: `DATABASE_URL` plus `PGHOST`, `PGPORT`, `PGUSER`, and `PGDATABASE` are written into the session's live shell before the agent starts.
+
+## Lifecycle
+
+- The branch container is deleted when the session closes.
+- An orphan sweep runs on app startup and reaps anything left behind.
+- The registry of images and branches lives at `~/.tempest/dbiso.db`.
+
+## The DB Clones panel
+
+The right sidebar's bottom tabs include a DB Clones panel listing the active clones with their name, port, and creation time.
+
+## Tauri commands
+
+The Rust backend exposes: `db_check_docker`, `db_check_ready`, `db_build`, `db_list_branches`, `db_sweep_orphans`.

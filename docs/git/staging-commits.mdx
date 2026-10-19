@@ -289,7 +289,7 @@ The DiffPane component is Tempest's unified diff viewer. It takes a file's raw g
 
 ### Diff Parsing
 
-The unified diff parser (in `lib.rs` lines 889-940) processes git's raw diff output and extracts:
+The unified diff parser (the `FileDiff`/`DiffLine` structs behind the `git_diff` and `git_diff_file` commands in `src-tauri/src/lib.rs`) processes git's raw diff output and extracts:
 - File status (M, A, D, R for modified, added, deleted, renamed)
 - File path
 - Hunk headers (start line numbers for old and new)
@@ -341,16 +341,15 @@ Git status is fetched via:
 git status --short
 ```
 
-The output format is a two-character index (position 0-1) followed by the file path:
-- `M ` = Modified in working tree only
-- ` M` = Modified in index only (staged)
+The output format is a two-character code (position 0-1) followed by the file path. **The first character (`x`) is the index (staged) status; the second (`y`) is the worktree status:**
+- ` M` = Modified in working tree only (unstaged)
+- `M ` = Modified in index (staged)
 - `MM` = Modified in both
-- `A ` = Added to working tree (untracked)
-- ` A` = Added to index (staged)
-- `D ` = Deleted from working tree
-- ` D` = Deleted from index
-- `R ` = Renamed
-- `C ` = Copied
+- `A ` = Added to the index (staged, new file)
+- `D ` = Deleted in the index (staged deletion)
+- ` D` = Deleted from the working tree
+- `R ` = Renamed (staged)
+- `C ` = Copied (staged)
 - `??` = Untracked
 
 The RightSidebar displays the "dominant" character: if either position is not space, use that status. Otherwise, use position 1. This gives a high-level view of each file's state.

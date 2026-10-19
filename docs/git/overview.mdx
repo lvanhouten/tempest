@@ -48,8 +48,8 @@ Tempest exposes the following git operations via Tauri commands. They are organi
 
 Worktrees are isolated checkouts of a git repository, allowing multiple branches to be worked on simultaneously within the same project.
 
-**create_terminal_worktree(project_path: string, name: string) -> Result<String, String>**
-- Creates a new git worktree via `git worktree add .tempest/[name] -b [name]`
+**create_terminal_worktree(project_path: string, name: string, existing_branch?: string) -> Result<String, String>**
+- Claims a worktree from a warm pool when available (3 pre-created slots, 5-minute TTL) or registers a new one via `git worktree add --no-checkout .tempest/[name] -b [name]` and materializes it in the background — see [Worktrees](/git/worktrees)
 - Copies gitignored files (.env, .env.local, etc.) so the agent sees them without committing
 - Links large dependency directories (node_modules, .venv) as junctions (Windows) or symlinks (Unix) to avoid copying 100s of MB
 - Returns the worktree path
@@ -282,7 +282,7 @@ The co-author hook appends the trailer to the commit message rather than replaci
 Tempest hardcodes "origin" as the remote name. Projects with multiple remotes must use the terminal to push to alternative remotes.
 
 **No Shallow Clones**
-Worktrees always clone the full repository history. For projects with very large histories (100k+ commits), initial worktree creation may be slow.
+Worktrees branch off the full repository history — a worktree is a checkout, not a clone, so it shares the main repository's object database. Tempest does not create shallow or partial worktrees.
 
 ## Edge Cases and Behaviors
 

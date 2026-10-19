@@ -32,12 +32,19 @@ If you want to work on something bigger, the **Tempest Bridge** workstream on th
 
 ```
 tempest-git/
-├── src/              React frontend (Tauri app)
-├── src-tauri/        Rust backend (Tauri app)
-├── packages/atlas/   Token Intelligence — code graph MCP server
-├── web/              Marketing website (Next.js)
-└── docs/             Documentation (Mintlify)
+├── src/                 React frontend (Tauri app)
+├── src-tauri/           Rust backend (Tauri app)
+│   └── crates/          hephaestus (process isolation), dbiso (Docker DB branching)
+├── packages/core/       Shared wire protocol (mobile companion)
+├── packages/crypto/     Shared crypto (mobile companion)
+├── packages/transport/  Shared transport (mobile companion)
+├── packages/atlas/      Token Intelligence — code graph MCP server (not an npm workspace)
+├── apps/                Mobile companion + relay worker
+├── web/                 Marketing website (Next.js)
+└── docs/                Documentation (Mintlify)
 ```
+
+The npm workspaces are `web`, `docs`, `apps/relay`, `packages/core`, `packages/crypto`, and `packages/transport`. Token Intelligence ships as the published `@usetempest/atlas` package — `npm install` stages it into `src-tauri/resources/atlas` for bundling.
 
 ## Prerequisites
 
@@ -56,12 +63,11 @@ cd tempest
 # Install all workspace dependencies (app + web + docs)
 npm install
 
-# Build the atlas bundle (required before first dev run)
-npm run setup
-
 # Start the desktop app
 npm run dev
 ```
+
+There is no separate setup step: `npm install` runs postinstall scripts that stage the Atlas bundle (from the published `@usetempest/atlas` package), the chat bridge dependencies, and cloudflared into the app's resources.
 
 ## Running individual pieces
 
@@ -86,10 +92,12 @@ Please run these locally rather than relying on CI to catch issues.
 
 Tempest follows a "tests grow with the code" policy:
 
-- **When adding major new functionality, add tests that exercise it.** Rust code lives under `src-tauri/src/` — use `#[cfg(test)]` modules for unit tests and `src-tauri/tests/` for integration tests (`cargo test`). TypeScript code under `src/` and `packages/atlas/` uses Vitest where tests exist; new suites should follow the same setup.
+- **When adding major new functionality, add tests that exercise it.** Rust code lives under `src-tauri/src/` — use `#[cfg(test)]` modules for unit tests (`cargo test`); there is no `src-tauri/tests/` directory. TypeScript code under `src/` is covered by self-checks: plain `*.check.ts` scripts kept next to the source that import pure functions and assert on them with `node:assert`.
 - **When fixing a bug, add a regression test** that fails before the fix and passes after, whenever the surface is testable.
 - **Reviewers will ask for tests** on PRs that add non-trivial logic. Trivial changes (docs, small refactors, UI copy) do not need tests.
-- **Run the relevant suite before pushing:** `cargo test` for Rust changes, `npm test` (per-package) for TypeScript changes.
+- **Run the relevant suite before pushing:** `cargo test` for Rust changes, `npm test` for the TypeScript self-checks.
+
+The root `npm test` runs `tests/run.mjs`, which discovers every `*.check.ts` under `src/` (18 at the moment) and runs each in its own Node process — no test framework, no build step. `npm test <filter>` runs only the checks whose path contains the filter string. There is no Vitest at the root; Vitest is used only inside the published Atlas package.
 
 We do not require 100% coverage, and some surfaces (Tauri window management, native OS integration) are exercised through manual QA rather than automation. Use judgment: if the code has branches, edge cases, or handles untrusted input, it should have tests.
 
@@ -102,10 +110,10 @@ We do not require 100% coverage, and some surfaces (Tauri window management, nat
 - **CSS variables only** — no hardcoded colours; all values go through `--tempest-*` vars so themes work
 - **No `React.StrictMode`** — it double-invokes effects and breaks PTY spawning
 
-### Atlas package (`packages/atlas/`)
+### Token Intelligence (`@usetempest/atlas`)
 
-- Run `npm run build:atlas` after any changes before testing in the app
-- `tsc --noEmit` must pass inside `packages/atlas/`
+- Tempest does not build Atlas locally. The `npm install` postinstall script stages the published `@usetempest/atlas` package (and its runtime dependencies) into `src-tauri/resources/atlas` for bundling.
+- If the staged bundle is missing or stale, re-run `npm install` to re-stage it.
 
 ### Website (`web/`)
 

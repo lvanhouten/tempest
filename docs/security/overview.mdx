@@ -1,0 +1,67 @@
+---
+title: "Security & Isolation"
+description: "Hephaestus process isolation, per-project security profiles, and permission controls — what is guaranteed and what is best-effort."
+icon: "shield"
+---
+
+# Security & Isolation
+
+Tempest's security story has three layers:
+
+1. **Process isolation** — every agent session runs under the Hephaestus sandbox
+2. **Launch permissions** — which agents may run in a project, and which flags they may carry
+3. **Network and filesystem policy** — what a session can reach on the machine and the internet
+
+## Hephaestus
+
+Hephaestus (`src-tauri/crates/hephaestus`) is Tempest's isolation engine. Every session carries a `SandboxSpec` whose mode is one of `off`, `monitor`, `enforce`, or `lifecycle`.
+
+| Platform | Mechanism | Notes |
+|----------|-----------|-------|
+| Windows | Job Objects with `KILL_ON_JOB_CLOSE`, optional memory and process limits, and CPU rate weight. An ETW ProcessWatcher captures brokered descendants. An optional kernel driver supplements this. | ETW requires admin rights or Performance Log Users membership and is silently skipped without them. Unsandboxed sessions still get a lifecycle job, so the whole process tree dies with the session. |
+| macOS | Seatbelt (`sandbox-exec`) profiles | Enforce mode denies by default; read-only system paths; read-write workspace; network only through the built-in proxy |
+| Linux | bubblewrap namespaces (`--unshare-pid --die-with-parent --unshare-net`) | Leaner than the other platforms — see the honest notes below |
+
+Honest enforcement notes:
+
+- Resource limits are Windows-only.
+- The max disk-write quota is accepted but not yet enforced.
+- On Windows, network policy is proxy-env injection — a policy filter, not a containment boundary.
+
+## Network policy
+
+An in-process HTTPS CONNECT proxy arbitrates egress. Host patterns support three shapes: `**.x` (suffix match), `*.x` (subdomain match), and exact matches. When both lists apply, `blockHosts` beats `allowHosts`.
+
+## Launch permissions
+
+Each project lists its permitted agents. The `allowSkipPermissions` setting gates the agents' skip-permission flags (for example `--dangerously-skip-permissions`) — a blocked flag is refused at spawn, not at first tool call.
+
+## Where to configure
+
+Project Settings → Security has five sections: **Sandbox**, **Network**, **Filesystem**, **Permissions**, and **Resources**. [tempest.yml](/tempest-yml) can express the same policy in the repo. UI settings and the file merge tightening-only — the stricter value always wins.
+
+## App-level toggles
+
+Settings → Security also holds the global toggles:
+
+- **Isolate agents** (`isolateAgents`, on by default)
+- **Auto-approve agent tool calls** (`autoApprove`, on by default)
+- **Precise agent status** (`preciseAgentStatus`)
+- **Desktop notifications** (`desktopNotifications`)
+- **Telemetry** — opt-in; when enabled, usage events go to PostHog
+
+## Keys and hygiene
+
+- BYOK keys live in the OS keyring under the service `tempest-byok` — see [API Keys](/settings/api-keys).
+- A co-author hook stamps AI co-authorship onto commits.
+- MCP config files are gitignored, so locally registered servers never reach the repo.
+
+## Security boundaries
+
+| Boundary | Status |
+|----------|--------|
+| The whole process tree dies with the session | **Guaranteed** — every session, sandboxed or not, gets a lifecycle job |
+| Enforce-mode sandbox around agent sessions | **Guaranteed** on each platform's mechanism (Job Objects / Seatbelt / bubblewrap) |
+| Broker-spawned descendants are captured | **Best-effort** — ETW ProcessWatcher needs admin or Performance Log Users; silently skipped without it |
+| Memory, process, and disk-write limits | **Best-effort** — Windows-only, and the disk-write quota is not yet enforced |
+| Network policy blocks egress | **Best-effort** — proxy-env injection on Windows is a policy filter, not a containment boundary |

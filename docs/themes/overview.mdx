@@ -67,6 +67,8 @@ Located at `src/themes/tempest-light/theme.json`
 
 Light theme designed for bright environments with muted accents and light backgrounds.
 
+Themes are auto-discovered at build time via `import.meta.glob` over `src/themes/**/theme.json` — adding a theme folder is all it takes. There is no theme registry array to edit.
+
 ## Color Token Categories
 
 Themes organize colors into semantic categories:
@@ -164,6 +166,17 @@ Standard status/message colors:
 - `terminal.black`, `terminal.red`, `terminal.green`, `terminal.yellow`, `terminal.blue`, `terminal.purple`, `terminal.cyan`, `terminal.white`: Standard colors
 - `terminal.brightBlack`, `terminal.brightRed`, `terminal.brightGreen`, `terminal.brightYellow`, `terminal.brightBlue`, `terminal.brightPurple`, `terminal.brightCyan`, `terminal.brightWhite`: Bright variants
 
+### Additional Token Groups
+
+The full built-in catalog is ~111 tokens per theme. In addition to the groups above, themes define:
+
+- `badge` (e.g., `badge.green`)
+- `canvas` (e.g., `canvas.border`)
+- `group` — `group.purple`, `group.blue`, `group.green`, `group.red`, `group.orange`, `group.pink`, `group.cyan`
+- `ui.*` — tab, shadow, overlay, and gutter tokens
+- `diff.*` — diff badge and branch colors
+- `minimap.*` — minimap overlay and border colors
+
 ## Using Themes in Components
 
 Components use CSS variables directly in stylesheets:
@@ -213,19 +226,12 @@ function MyComponent() {
 
 ### Persistence
 
-The currently selected theme is persisted to localStorage under the key `tempest-theme`. On app startup, the system:
+The currently selected theme is persisted as `RuntimeState.theme` (a JSON row in the SQLite `app_state` table, keyed `runtime`). On app startup, the system:
 
-1. Checks if a theme is saved in localStorage
-2. Validates the saved theme name (handles legacy "Origin" theme name migration)
+1. Checks if a theme name is saved in runtime state
+2. Validates the saved theme name against the discovered themes
 3. Falls back to system preference (dark or light mode)
 4. Falls back to the first available built-in theme if no match is found
-
-### Legacy Theme Names
-
-For backwards compatibility, the system automatically migrates old theme names:
-
-- "Origin Dark" → "Tempest Dark"
-- "Origin Light" → "Tempest Light"
 
 ## Application Flow
 
@@ -233,7 +239,7 @@ For backwards compatibility, the system automatically migrates old theme names:
 2. **Theme Resolution**: On startup, `resolveDefaultTheme()` determines which theme to use
 3. **CSS Application**: `applyTheme()` sets all CSS variables on the document root and adds a `data-theme` attribute
 4. **Component Rendering**: React components access variables via `var(--tempest-*)`
-5. **Theme Switching**: Users can change themes via `setTheme()`, which updates state, applies CSS, and persists to localStorage
+5. **Theme Switching**: Users can change themes via `setTheme()`, which updates state, applies CSS, and persists to runtime state
 
 ## Creating Custom Themes
 

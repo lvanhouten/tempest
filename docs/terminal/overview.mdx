@@ -346,7 +346,7 @@ observer.observe(el);
 
 ### WebGL Context Pool
 
-xterm.js can render with WebGL acceleration (faster) or canvas fallback (slower). Tempest pools up to 6 WebGL contexts and assigns them to visible panes. When a pane is hidden, its context is released back to the pool.
+xterm.js can render with WebGL acceleration (faster) or canvas fallback (slower). Tempest pools up to 6 WebGL contexts and assigns them to visible panes. When a pane is hidden, its context is released back to the pool. Whether WebGL is allowed is decided by a WSL-aware policy (`src/lib/terminalRendererPolicy.ts`): a WSL probe runs once at startup, and WebGL rendering is disabled when the app runs inside WSL.
 
 ```tsx
 // On show: acquire a context
@@ -491,7 +491,7 @@ class SessionManager {
 
 ### Buffer and Replay
 
-Each session maintains a ring buffer of recent PTY output (capped at 2MB). When a TerminalPane component attaches, it receives all buffered chunks for replay:
+Each session maintains a ring buffer of recent PTY output (capped at 2 MB while a pane is attached, 128 KB when detached). When a TerminalPane component attaches, it receives all buffered chunks for replay; the focus/restore path is orchestrated by `src/lib/terminalRestore.ts`:
 
 ```ts
 attach(sessionId: string, onData: (data: string) => void): string[] {
@@ -620,7 +620,7 @@ interface Session {
     name: string;
     cwd: string;
     projectId: string;
-    kind?: "terminal" | "diff" | "preview" | "editor";
+    kind?: "terminal" | "diff" | "preview" | "editor" | "thread";
     agent?: string;
     conversationId?: string;
     instanceId: string;
@@ -635,7 +635,7 @@ interface Session {
 
 ### Session Persistence
 
-Sessions are saved to localStorage keyed by project/worktree. When the app restarts, WorkspaceView's `useEffect` re-hydrates stored sessions and calls `openSession` for each, which calls `create_pty_session` on the backend.
+Sessions are persisted to the SQLite sessions table (`tempest.db` in the app data dir), keyed by project/worktree. When the app restarts, WorkspaceView's `useEffect` re-hydrates stored sessions and calls `openSession` for each, which calls `create_pty_session` on the backend.
 
 ### Multiple Panes (Split View)
 
@@ -647,7 +647,7 @@ interface SplitLeaf   { type: "leaf";  sessionId: string; }
 interface SplitBranch { type: "split"; id: string; dir: SplitDir; ratio: number; first: PaneNode; second: PaneNode; }
 ```
 
-Layout changes are persisted to localStorage so multi-pane layouts survive restart.
+Layout changes are persisted to the SQLite `layouts` and `layout_nodes` tables so multi-pane layouts survive restart.
 
 ## Copy and Paste Behavior
 
@@ -721,7 +721,7 @@ From that point, SessionManager owns the Channel and listens for chunks on `chan
 
 ## Display Settings and Defaults
 
-Terminal display settings are stored in localStorage via `appSettings.ts`:
+Terminal display settings are part of app settings, persisted in runtime state (a JSON row in the SQLite `app_state` table) via `appSettings.ts`:
 
 ```ts
 export interface AppSettings {

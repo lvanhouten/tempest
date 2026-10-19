@@ -67,7 +67,7 @@ claude config --model claude-3-5-sonnet-20241022
 
 ### Tempest Integration
 
-- **Session ID**: Persisted as `conversationId` in localStorage
+- **Session ID**: Persisted as `conversationId` in the session store (SQLite)
 - **Work-Done Detection**: 
   - Primary: OSC 9 notification signal at turn completion
   - Secondary: Title-based detection (title starts with `✳` for idle, Unicode spinners for busy)
@@ -132,7 +132,7 @@ gemini config --model gemini-pro
 
 ### Tempest Integration
 
-- **Session ID**: Persisted as `conversationId` in localStorage
+- **Session ID**: Persisted as `conversationId` in the session store (SQLite)
 - **Work-Done Detection**:
   - Primary: OSC 9 notification signal at turn completion
   - Secondary: Title-based detection (title starts with `◇` for idle, `✦` or `✋` for busy)

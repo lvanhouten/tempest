@@ -12,7 +12,7 @@ The **Atlas MCP Server** exposes the code knowledge graph via the Model Context 
 
 The MCP server is a Node.js process that:
 
-- Opens the `.atlas/` SQLite database for a project
+- Opens the `.tempest/atlas/` SQLite database for a project
 - Implements the MCP specification (tools, resources, protocol)
 - Exposes Atlas functionality as AI-readable tools
 - Handles concurrent requests from multiple agents
@@ -30,7 +30,7 @@ The MCP server supports three runtime modes, decided at startup based on configu
 
 ```
 Agent → MCP host ← stdio → MCP server (process)
-                              └─ .atlas/atlas.db
+                              └─ .tempest/atlas/atlas.db
 ```
 
 - Simplest setup
@@ -38,7 +38,7 @@ Agent → MCP host ← stdio → MCP server (process)
 - Process exits when client disconnects
 - Used when:
   - `ATLAS_NO_DAEMON=1` environment variable is set
-  - No `.atlas/` directory exists
+  - No `.tempest/atlas/` directory exists
   - Daemon machinery fails to initialize
 
 **Startup:**
@@ -54,10 +54,10 @@ node .../atlas/dist/mcp/server-entry.js --path /project
 Agent ← stdio → Proxy (short-lived)
                     │
                     └─ socket ── Daemon (long-lived)
-                                   └─ .atlas/atlas.db
+                                   └─ .tempest/atlas/atlas.db
 ```
 
-- Used by default when `.atlas/` exists and daemon is available
+- Used by default when `.tempest/atlas/` exists and daemon is available
 - Proxy is lightweight, exits when agent disconnects
 - Daemon persists in background, serves multiple clients
 - Proxy carries PPID watchdog to gracefully tear down if host is killed
@@ -89,11 +89,11 @@ Proxy 3 ─┘     (Unix: /tmp/.../atlas.sock)
 - Detached process, not a child of any host
 - Survives individual agent disconnects
 - Exits after client-refcount timeout (~5 minutes idle)
-- Logs to `.atlas/daemon.log`
+- Logs to `.tempest/atlas/daemon.log`
 
 **Process management:**
 
-- Lockfile at `.atlas/daemon.lock` arbitrates startup races
+- Lockfile at `.tempest/atlas/daemon.lock` arbitrates startup races
 - Multiple launchers may race to spawn; only one wins
 - Winner acquires O_EXCL lock, binds socket, serves all proxies
 - Losers detect the lock, connect to winner's socket
@@ -112,17 +112,17 @@ node .../atlas/dist/mcp/server-entry.js --path /project \
 
 When you enable Token Intelligence or start an agent in Tempest:
 
-1. Tempest's Rust backend calls `start_atlas_index()` if `.atlas/` doesn't exist
-   - Spawns `atlas --init --path <project>` (background Node process)
-   - Tauri toast polls for `.atlas/atlas.db` to appear
+1. Tempest's Rust backend calls `start_atlas_index` if `.tempest/atlas/` doesn't exist
+   - Spawns `node .../atlas/dist/mcp/server-entry.js --init --path <project>` (background Node process)
+   - The `AtlasIndexModal` polls the `check_atlas_db` command for `.tempest/atlas/atlas.db`
    - Background indexing happens while you work
 
-2. When an agent spawns, Tempest starts the MCP server:
-   - Calls `invoke<boolean>("start_atlas_mcp", { projectPath })`
-   - Spawns `node .../atlas/dist/mcp/server-entry.js --path <project>`
-   - Server immediately prints MCP handshake to stdout
+2. Tempest writes MCP config files (below) that point agents at the server
+   - Each entry runs `node .../atlas/dist/mcp/server-entry.js --path <project>`
+   - The agent's MCP host spawns the server process and connects over stdio
+   - The server immediately prints MCP handshake to stdout
 
-3. The agent's MCP host receives the server process and connects over stdio
+3. Tempest can also manage a long-lived daemon per project through the `start_atlas_daemon` / `stop_atlas_daemon` commands (tracked in `atlas-daemons.json` in the app data dir), so multiple agents share one server process and file watcher
 
 **Configuration:** Tempest writes MCP server config to:
 
@@ -130,7 +130,9 @@ When you enable Token Intelligence or start an agent in Tempest:
 - `.cursor/mcp.json` (Cursor)
 - `.gemini/settings.json` (Google Gemini)
 - `.kiro/settings/mcp.json` (AWS Kiro)
-- `.github/copilot/config.json` (GitHub Copilot)
+- `opencode.jsonc` (falls back to `opencode.json`)
+
+It can also register the server globally for Codex (`~/.codex/config.toml`, under `[mcp_servers.atlas]`) and Goose (`~/.config/goose/profiles.yaml`). Matching `.gitignore` entries are added alongside the project-level files so they stay out of version control.
 
 Example `.mcp.json`:
 ```json
@@ -158,7 +160,7 @@ node .../atlas/dist/mcp/server-entry.js --init --path /your/project
     "atlas": {
       "command": "node",
       "args": [
-        "/path/to/@tempest/atlas/dist/mcp/server-entry.js",
+        "/path/to/@usetempest/atlas/dist/mcp/server-entry.js",
         "--path",
         "/absolute/path/to/your/project"
       ]
@@ -176,7 +178,7 @@ The server will start in proxy or daemon mode automatically.
 When the MCP host starts the server process, the server writes MCP initialization messages to stdout:
 
 ```json
-{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{},"resources":{}},"serverInfo":{"name":"atlas","version":"1.1.6"}}}
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{},"resources":{}},"serverInfo":{"name":"atlas","version":"1.3.x"}}}
 ```
 
 The host responds with:
@@ -211,9 +213,9 @@ Clients invoke tools via `tools/call`:
   "id": 3,
   "method": "tools/call",
   "params": {
-    "name": "atlas_search",
+    "name": "atlas_explore",
     "arguments": {
-      "query": "authentication"
+      "query": "How does authentication work?"
     }
   }
 }
@@ -226,7 +228,51 @@ Server responds with results or error, including:
 
 ## Exposed Tools
 
-The Atlas MCP server exposes the following tools to agents:
+By default the server lists a deliberately small read-only surface. Every other tool is a strict subset of `atlas_explore`, and listing them was steering agents toward worse picks.
+
+### atlas_explore
+
+The primary read-equivalent: ask a natural-language question or name the symbols you care about, and one capped call returns the verbatim, line-numbered source of the relevant symbols grouped by file, plus the call path among them (dynamic-dispatch hops included) and a blast-radius summary of what depends on them. Usually the only tool an agent needs.
+
+**Arguments:**
+- `query` (string, required): Symbol names, file names, or a natural-language question (e.g., "How does user login work?")
+- `maxFiles` (number, optional): Maximum number of files to include source from (default: 12)
+
+### atlas_assets
+
+List human-attached knowledge — markdown notes and other docs a developer explicitly attached to the codebase. Treat their presence as intentional context, not a scan of the disk.
+
+**Arguments:**
+- `contentType` (string, optional): MIME prefix filter (e.g., `text/markdown`, `text/`); omit to list all
+- `linkedTo` (string, optional): Symbol node id — return only assets attached to that symbol via a `describes` edge
+- `format` (string, optional): `"markdown"` (default) or `"json"` (structured array)
+
+### atlas_asset_content
+
+Return the extracted text of one asset by id. Content is already capped at attach time — no pagination.
+
+**Arguments:**
+- `id` (string, required): Asset id (from `atlas_assets`)
+
+### atlas_semantic_search
+
+Pure vector-similarity search across code symbols and attached assets. Skips graph traversal when you want ranked candidates directly (e.g., "find notes and code about auth session expiry").
+
+**Arguments:**
+- `query` (string, required): Natural-language query
+- `limit` (number, optional): Max results (default: 10, max: 50)
+
+**Note:** Requires the semantic setting to be on (a one-time ~25 MB MiniLM model download). When it is off, the tool responds with an informational message instead of an error.
+
+### Legacy tools
+
+`atlas_search`, `atlas_node`, `atlas_graph`, `atlas_file_dependencies`, and `atlas_status` remain implemented and callable, but they are no longer listed by default because every one is a strict subset of `atlas_explore`. Re-enable them per-agent with the `ATLAS_MCP_TOOLS` environment variable:
+
+```bash
+ATLAS_MCP_TOOLS=explore,node,search,callers,semantic_search
+```
+
+The mutation tools `atlas_asset_add` / `atlas_asset_remove` exist on the handler surface (the Knowledge Base Docs panel uses them) but are not part of the read-only default list.
 
 ### atlas_search
 
@@ -258,42 +304,6 @@ Search the code graph by name or full-text.
   ]
 }
 ```
-
-### atlas_explore
-
-Find relevant code context for a natural language query.
-
-**Purpose:** Answer "How does X work?" by returning a focused subgraph of relevant nodes and code snippets.
-
-**Arguments:**
-- `query` (string, required): Task or question (e.g., "How does user login work?")
-- `maxFiles` (number, optional): Max files to include (default: adaptive based on project size)
-
-**Returns:**
-```json
-{
-  "nodes": [...],
-  "edges": [...],
-  "files": {
-    "src/auth.ts": {
-      "snippets": [
-        {
-          "nodeId": "src/auth.ts::authenticate",
-          "startLine": 42,
-          "endLine": 58,
-          "code": "..."
-        }
-      ]
-    }
-  },
-  "relationships": {
-    "calls": [...],
-    "references": [...]
-  }
-}
-```
-
-Intelligently scales output based on project size (small projects get more context per call).
 
 ### atlas_node
 
@@ -379,7 +389,7 @@ Get project index status and statistics.
   "lastIndexedAt": 1234567890000,
   "indexFreshness": "fresh",
   "indexBuildInfo": {
-    "version": "1.1.6",
+    "version": "1.3.x",
     "extractionVersion": 5
   },
   "isStale": false,
@@ -519,7 +529,7 @@ Atlas uses SQLite with WAL (Write-Ahead Log) mode:
 
 ### Token Efficiency
 
-Typical token savings using Atlas:
+Measured across the benchmark suite in BENCHMARKS.md: agents using Atlas see a median 76% reduction in total tokens, with per-repo savings up to 86%. The per-query table below is illustrative:
 
 | Query | Without Atlas | With Atlas | Savings |
 |-------|---|---|---|
@@ -545,14 +555,14 @@ Savings come from:
 **Error:** "Database is locked"
 
 - Cause: Another process is indexing or the database is corrupted
-- Fix: Wait for indexing to complete, or remove `.atlas/` and re-index
+- Fix: Wait for indexing to complete, or remove `.tempest/atlas/` and re-index
 
 ### Daemon Won't Start
 
 **Error:** "Could not bind socket" or "daemon.sock exists"
 
 - Cause: Stale socket from previous daemon or race condition
-- Fix: Remove `.atlas/daemon.lock` and retry
+- Fix: Remove `.tempest/atlas/daemon.lock` and retry
 - OR: Set `ATLAS_NO_DAEMON=1` to run in direct mode instead
 
 ### Proxy/Client Won't Connect
@@ -560,7 +570,7 @@ Savings come from:
 **Error:** "ECONNREFUSED: connection refused"
 
 - Cause: Daemon didn't start or socket isn't ready
-- Fix: Check `.atlas/daemon.log` for errors
+- Fix: Check `.tempest/atlas/daemon.log` for errors
 - Fallback: `ATLAS_NO_DAEMON=1` to run in direct mode
 
 ### Tool Returns Empty Results
@@ -568,12 +578,12 @@ Savings come from:
 **Possible causes:**
 
 1. Index is empty (no files indexed yet)
-   - Run `atlas index --path <project>` manually
-   - Check `atlas_status` to verify index exists
+   - Re-run the initial index: `node .../atlas/dist/mcp/server-entry.js --init --path <project>`
+   - Check that `.tempest/atlas/atlas.db` exists (Tempest's `check_atlas_db` command does this)
 
 2. Query is too specific
    - Try broader terms ("auth" instead of "authenticate")
-   - Use `atlas_search` first to see what symbols exist
+   - Use `atlas_explore` with broader terms to see what symbols exist
 
 3. File is excluded
    - Check `.gitignore` and `atlas.json` exclude patterns
@@ -584,32 +594,26 @@ Savings come from:
 **Error:** "MCP server disconnected" or repeated timeouts
 
 - Cause: Server process crashed or ran out of resources
-- Check: `.atlas/daemon.log` for errors
+- Check: `.tempest/atlas/daemon.log` for errors
 - Solution: Restart agent or Tempest
 
 ### High Memory Usage
 
 - Cause: Large graph or long-running daemon with many symbols
-- Solution: Restart daemon (`kill -9` process with PID from `.atlas/daemon.lock`)
+- Solution: Restart daemon (kill the process with the PID from `.tempest/atlas/daemon.lock`)
 - Or: Use `ATLAS_NO_DAEMON=1` for fresh process per agent
 
-## Architecture & Code Structure
+## Architecture
 
-Key files in `packages/atlas/src/mcp/`:
+The MCP server ships inside the published `@usetempest/atlas` npm package (Tempest stages it into `src-tauri/resources/atlas/` at install time), so its source tree is not part of this repository. Conceptually it is layered as:
 
-- `index.ts` — MCPServer class (main entry point)
-- `server-entry.ts` — CLI entry point (handles --init, --path flags)
-- `engine.ts` — MCP protocol implementation (tool schemas, dispatch)
-- `tools.ts` — Tool handler implementations (search, explore, graph, etc.)
-- `daemon.ts` — Detached daemon process lifecycle
-- `proxy.ts` — Stdio ← → socket bridge
-- `transport.ts` — MCP protocol serialization
-- `session.ts` — Per-connection session state
-- `daemon-manager.ts` — Daemon lifecycle management
-- `ppid-watchdog.ts` — Process parent monitoring
-- `liveness-watchdog.ts` — Main thread health monitoring
-- `query-pool.ts` — Worker thread pool for graph queries
-- `dynamic-boundaries.ts` — Dynamic dispatch (scanning code for certain patterns)
+- **Entry point** — `dist/mcp/server-entry.js` parses the `--init` / `--path` / `--download-model` / `--semantic` flags and picks a runtime mode
+- **Direct mode** — one stdio server process per MCP client, no daemon
+- **Proxy mode** — a short-lived stdio-to-socket bridge that forwards requests to a shared daemon; carries a PPID watchdog so the proxy tears down gracefully if its host process is killed
+- **Daemon mode** — a detached, long-lived process serving many proxies over a socket or named pipe, with a liveness watchdog (a heartbeat that kills the process if the main thread hangs for 10+ seconds) and an idle timeout (~5 minutes with no clients)
+- **Query engine** — executes graph queries against the SQLite index and dispatches tool calls
+
+Tempest interacts with this layer only through the Tauri commands above (`start_atlas_index`, `start_atlas_daemon` / `stop_atlas_daemon`, `atlas_mcp_tools` / `atlas_mcp_call` for one-shot stdio MCP bridging, `get_atlas_graph`, `atlas_query`) and the MCP config files it writes.
 
 ## Advanced Configuration
 
@@ -624,7 +628,7 @@ ATLAS_NO_DAEMON=1 node .../atlas/dist/mcp/server-entry.js --path /project
 ### Custom Daemon Paths
 
 The daemon socket path is computed from:
-- Project root `.atlas/` directory
+- Project root `.tempest/atlas/` directory
 - Hash of the absolute path (prevents collisions with symlinks)
 
 **Result:**
@@ -633,7 +637,7 @@ The daemon socket path is computed from:
 
 ### Logging
 
-Daemon logs to `.atlas/daemon.log`. Enable verbose logging:
+Daemon logs to `.tempest/atlas/daemon.log`. Enable verbose logging:
 
 ```bash
 DEBUG=atlas:* node .../atlas/dist/mcp/server-entry.js --path /project

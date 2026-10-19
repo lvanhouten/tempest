@@ -16,7 +16,7 @@ Every chat node picks one of three backends via the model dropdown. The choice i
 
 | Backend | What it uses | Auth |
 |---------|--------------|------|
-| **API** (BYOK) | Provider SDK called from the Rust backend | [OS credential manager](/settings/api-keys) |
+| **API** (BYOK) | Provider SDKs called from the app's frontend via the Vercel AI SDK (`streamChat` in `src/lib/chat.ts`) | [OS credential manager](/settings/api-keys) |
 | **CLI Agent** | The vendor CLI, driven headlessly by a per-turn Node bridge | Whatever the CLI itself is logged into |
 | **Warp** (experimental) | The `warpllm` Rust gateway, single-round-trip | BYOK slot or provider env var |
 
@@ -27,7 +27,7 @@ Streaming, message rendering, tool-call display, and copy-to-clipboard behave th
 Clicking the model chip opens a portal picker with two sections:
 
 - **CLI Agents** — grouped by agent (Claude Code, Codex, Gemini CLI, Opencode). Each agent has a shortlist of its own models. When the experimental Warp toggle is on, Warp shows up here too with a `provider/model` list (OpenAI, DeepSeek, Kimi, OpenRouter).
-- **BYOK providers** — Anthropic, OpenAI, Google Gemini, Mistral, DeepSeek, xAI, Groq, OpenRouter, Ollama, LM Studio — each with a shortlist. The active provider is remembered across sessions.
+- **BYOK providers** — Anthropic, OpenAI, Google Gemini, Mistral, DeepSeek, xAI, Groq, OpenRouter, Ollama — each with a shortlist. The active provider is remembered across sessions.
 
 A search box across the picker filters both sections at once.
 

@@ -1,0 +1,262 @@
+---
+title: "Model Catalog"
+description: "The models available in chat nodes: BYOK providers, CLI-agent shortlists, and the models.json patch channel."
+icon: "cpu"
+---
+
+# Model Catalog
+
+Every chat node picks a model from a portal picker fed by three sources: the bundled BYOK provider shortlists, the CLI agents' own `--model` alias lists, and a remote patch channel that can update the BYOK lists without an app release. This page is the full catalog as coded in `src/lib/chatModels.ts`.
+
+For how the backends themselves work — API, CLI agent, and Warp — see [Chat Pane](/chat/overview). The short version: the **API (BYOK)** backend calls provider SDKs from the app's frontend via the Vercel AI SDK, the **CLI Agent** backend drives the vendor CLI headlessly through a per-turn Node bridge (auth is whatever the CLI is already logged into), and **Warp** is an experimental Rust gateway that routes `provider/model` strings in a single round trip.
+
+## BYOK providers
+
+Nine providers ship in the bundled floor (`PROVIDER_MODELS` in `src/lib/chatModels.ts`), 88 models in total. Context windows come from the `context` map in `config/models.json`; models without an entry there fall back to the 128,000-token default (`DEFAULT_CONTEXT`).
+
+<Tabs>
+  <Tab title="Anthropic">
+    | Model | id | Context window |
+    |-------|----|----------------|
+    | Claude Fable 5 | `claude-fable-5` | 2,000,000 |
+    | Claude Opus 4.8 | `claude-opus-4-8` | 200,000 |
+    | Claude Opus 4.7 | `claude-opus-4-7` | 200,000 |
+    | Claude Opus 4.6 | `claude-opus-4-6` | 200,000 |
+    | Claude Opus 4.5 | `claude-opus-4-5` | 200,000 |
+    | Claude Sonnet 5 | `claude-sonnet-5` | 200,000 |
+    | Claude Sonnet 4.6 | `claude-sonnet-4-6` | 200,000 |
+    | Claude Sonnet 4.5 | `claude-sonnet-4-5` | 200,000 |
+    | Claude Haiku 4.5 | `claude-haiku-4-5-20251001` | 200,000 |
+  </Tab>
+  <Tab title="OpenAI">
+    | Model | id | Context window |
+    |-------|----|----------------|
+    | GPT-5.5 | `gpt-5.5` | 128,000 (default) |
+    | GPT-5.4 | `gpt-5.4` | 128,000 (default) |
+    | GPT-5.4 Mini | `gpt-5.4-mini` | 128,000 (default) |
+    | GPT-5.4 Nano | `gpt-5.4-nano` | 128,000 (default) |
+    | GPT-5 | `gpt-5` | 128,000 (default) |
+    | GPT-5 Mini | `gpt-5-mini` | 128,000 (default) |
+    | GPT-4.1 | `gpt-4.1` | 1,047,576 |
+    | GPT-4.1 Mini | `gpt-4.1-mini` | 1,047,576 |
+    | GPT-4.1 Nano | `gpt-4.1-nano` | 1,047,576 |
+    | GPT-4o | `gpt-4o` | 128,000 |
+    | GPT-4o Mini | `gpt-4o-mini` | 128,000 |
+    | o4 Mini | `o4-mini` | 200,000 |
+    | o3 | `o3` | 200,000 |
+    | o3 Mini | `o3-mini` | 200,000 |
+  </Tab>
+  <Tab title="Gemini">
+    | Model | id | Context window |
+    |-------|----|----------------|
+    | Gemini 3.5 Flash | `gemini-3.5-flash` | 128,000 (default) |
+    | Gemini 3.1 Pro | `gemini-3.1-pro-preview` | 128,000 (default) |
+    | Gemini 3.1 Flash Lite | `gemini-3.1-flash-lite-preview` | 128,000 (default) |
+    | Gemini 3 Flash | `gemini-3-flash-preview` | 128,000 (default) |
+    | Gemini 2.5 Pro | `gemini-2.5-pro` | 1,048,576 |
+    | Gemini 2.5 Flash | `gemini-2.5-flash` | 1,048,576 |
+    | Gemini Flash | `gemini-flash-latest` | 1,048,576 |
+    | Gemini Flash Lite | `gemini-flash-lite-latest` | 1,048,576 |
+  </Tab>
+  <Tab title="Mistral">
+    | Model | id | Context window |
+    |-------|----|----------------|
+    | Mistral Large | `mistral-large-latest` | 131,072 |
+    | Mistral Large 3 | `mistral-large-2512` | 131,072 |
+    | Mistral Medium | `mistral-medium-2508` | 131,072 |
+    | Magistral Medium | `magistral-medium-2509` | 131,072 |
+    | Magistral Small | `magistral-small-2509` | 131,072 |
+    | Mistral Small | `mistral-small-latest` | 131,072 |
+    | Mistral Small 4 | `mistral-small-2603` | 131,072 |
+    | Devstral | `devstral-2512` | 128,000 (default) |
+    | Ministral 14B | `ministral-14b-2512` | 128,000 (default) |
+    | Ministral 8B | `ministral-8b-2512` | 128,000 (default) |
+    | Ministral 3B | `ministral-3b-2512` | 128,000 (default) |
+  </Tab>
+  <Tab title="DeepSeek">
+    | Model | id | Context window |
+    |-------|----|----------------|
+    | DeepSeek V4 Pro | `deepseek-v4-pro` | 128,000 (default) |
+    | DeepSeek V4 Flash | `deepseek-v4-flash` | 128,000 (default) |
+    | DeepSeek V3 | `deepseek-v3` | 163,840 |
+    | DeepSeek Chat | `deepseek-chat` | 163,840 |
+    | DeepSeek Reasoner | `deepseek-reasoner` | 163,840 |
+  </Tab>
+  <Tab title="xAI">
+    | Model | id | Context window |
+    |-------|----|----------------|
+    | Grok 4.20 | `grok-4.20-non-reasoning-latest` | 128,000 (default) |
+    | Grok 4.20 Reasoning | `grok-4.20-reasoning-latest` | 128,000 (default) |
+    | Grok 4.1 Fast | `grok-4-1-fast-non-reasoning` | 128,000 (default) |
+    | Grok 4.1 Fast Reasoning | `grok-4-1-fast-reasoning` | 128,000 (default) |
+    | Grok 4 Fast | `grok-4-fast-non-reasoning` | 128,000 (default) |
+    | Grok 4 Fast Reasoning | `grok-4-fast-reasoning` | 128,000 (default) |
+    | Grok 4 | `grok-4` | 256,000 |
+    | Grok Code Fast | `grok-code-fast-1` | 128,000 (default) |
+    | Grok 3 | `grok-3` | 131,072 |
+    | Grok 3 Mini | `grok-3-mini` | 131,072 |
+  </Tab>
+  <Tab title="Groq">
+    | Model | id | Context window |
+    |-------|----|----------------|
+    | GPT-OSS 120B | `openai/gpt-oss-120b` | 128,000 (default) |
+    | GPT-OSS 20B | `openai/gpt-oss-20b` | 128,000 (default) |
+    | Qwen 3 32B | `qwen/qwen3-32b` | 128,000 (default) |
+    | Qwen 3.6 27B | `qwen/qwen3.6-27b` | 128,000 (default) |
+    | Kimi K2 | `moonshotai/kimi-k2-instruct-0905` | 128,000 (default) |
+    | Llama 3.3 70B | `llama-3.3-70b-versatile` | 128,000 (default) |
+    | Llama 3.1 8B | `llama-3.1-8b-instant` | 128,000 (default) |
+  </Tab>
+  <Tab title="OpenRouter">
+    | Model | id | Context window |
+    |-------|----|----------------|
+    | Auto | `openrouter/auto` | 128,000 (default) |
+    | DeepSeek V3.2 | `deepseek/deepseek-v3.2` | 128,000 (default) |
+    | DeepSeek V3.2 Thinking | `deepseek/deepseek-v3.2-thinking` | 128,000 (default) |
+    | DeepSeek V3.1 Terminus | `deepseek/deepseek-v3.1-terminus` | 128,000 (default) |
+    | Gemini 3.1 Pro | `google/gemini-3.1-pro-preview` | 128,000 (default) |
+    | Gemini 3 Flash | `google/gemini-3-flash` | 128,000 (default) |
+    | Gemini 2.5 Pro | `google/gemini-2.5-pro` | 128,000 (default) |
+    | Kimi K2.5 | `moonshotai/kimi-k2.5` | 128,000 (default) |
+    | Kimi K2 Thinking Turbo | `moonshotai/kimi-k2-thinking-turbo` | 128,000 (default) |
+    | MiniMax M2.5 | `minimax/minimax-m2.5` | 128,000 (default) |
+    | Qwen 3 Coder Plus | `alibaba/qwen3-coder-plus` | 128,000 (default) |
+    | Qwen 3 Max | `alibaba/qwen3-max` | 128,000 (default) |
+    | Llama 3.3 70B | `meta-llama/llama-3.3-70b-instruct` | 128,000 (default) |
+    | Mistral Large | `mistral/mistral-large-latest` | 128,000 (default) |
+  </Tab>
+  <Tab title="Ollama">
+    Local models; no key required.
+
+    | Model | id | Context window |
+    |-------|----|----------------|
+    | Llama 3.3 70B | `llama3.3` | 128,000 (default) |
+    | Llama 3.2 | `llama3.2` | 128,000 (default) |
+    | Llama 3.1 | `llama3.1` | 128,000 (default) |
+    | Qwen 3 | `qwen3` | 128,000 (default) |
+    | Qwen 2.5 Coder | `qwen2.5-coder` | 128,000 (default) |
+    | DeepSeek R1 | `deepseek-r1` | 128,000 (default) |
+    | DeepSeek V3 | `deepseek-v3` | 128,000 (default) |
+    | Code Llama | `codellama` | 128,000 (default) |
+    | Mistral 7B | `mistral` | 128,000 (default) |
+    | Neural Chat | `neural-chat` | 128,000 (default) |
+  </Tab>
+</Tabs>
+
+## CLI agent shortlists
+
+The four CLI-agent backends ride the same `cli` backend and bridge sidecar; each has its own `--model` alias shortlist (`CLI_AGENT_MODELS` in `src/lib/chatModels.ts`). Order is default first.
+
+<Tabs>
+  <Tab title="Claude Code">
+    | Model | id |
+    |-------|----|
+    | Haiku (default) | `haiku` |
+    | Sonnet | `sonnet` |
+    | Opus | `opus` |
+
+    These are the CLI's real `--model` aliases, not BYOK model ids.
+  </Tab>
+  <Tab title="Codex">
+    | Model | id |
+    |-------|----|
+    | GPT-5 Codex (default) | `gpt-5-codex` |
+    | GPT-5.5 | `gpt-5.5` |
+    | GPT-5.4 | `gpt-5.4` |
+    | GPT-5.4 Mini | `gpt-5.4-mini` |
+    | GPT-5 | `gpt-5` |
+    | GPT-5 Mini | `gpt-5-mini` |
+    | o4 Mini | `o4-mini` |
+    | o3 | `o3` |
+
+    Codex passes `-m` through to the OpenAI Responses API, so any model that endpoint accepts works — this is the picker's default shortlist.
+  </Tab>
+  <Tab title="OpenCode">
+    Model ids are `provider/model`. The list mirrors `opencode models` output: the paid `opencode-go/*` tier first (coding-strongest at top), then the free `opencode/*` tier.
+
+    | Model | id |
+    |-------|----|
+    | GPT-5.6 Luna (default) | `opencode-go/gpt-5.6-luna` |
+    | Grok 4.5 | `opencode-go/grok-4.5` |
+    | Kimi K3 | `opencode-go/kimi-k3` |
+    | Kimi K2.7 Code | `opencode-go/kimi-k2.7-code` |
+    | Kimi K2.6 | `opencode-go/kimi-k2.6` |
+    | DeepSeek V4 Pro | `opencode-go/deepseek-v4-pro` |
+    | DeepSeek V4 Flash | `opencode-go/deepseek-v4-flash` |
+    | GLM 5.3 | `opencode-go/glm-5.3` |
+    | GLM 5.2 | `opencode-go/glm-5.2` |
+    | GLM 5.1 | `opencode-go/glm-5.1` |
+    | Qwen 3.8 Max | `opencode-go/qwen3.8-max` |
+    | Qwen 3.7 Max | `opencode-go/qwen3.7-max` |
+    | Qwen 3.7 Plus | `opencode-go/qwen3.7-plus` |
+    | Qwen 3.6 Plus | `opencode-go/qwen3.6-plus` |
+    | MiniMax M3 | `opencode-go/minimax-m3` |
+    | MiniMax M2.7 | `opencode-go/minimax-m2.7` |
+    | MiMo v2.5 Pro | `opencode-go/mimo-v2.5-pro` |
+    | MiMo v2.5 | `opencode-go/mimo-v2.5` |
+    | Hy3 | `opencode-go/hy3` |
+    | Big Pickle (free) | `opencode/big-pickle` |
+    | Nemotron 3 Ultra (free) | `opencode/nemotron-3-ultra-free` |
+    | Nemotron 3.5 Lightning (free) | `opencode/nemotron-3.5-lightning-free` |
+    | DeepSeek V4 Flash (free) | `opencode/deepseek-v4-flash-free` |
+    | Laguna S 2.1 (free) | `opencode/laguna-s-2.1-free` |
+    | MiMo v2.5 (free) | `opencode/mimo-v2.5-free` |
+    | Hy3 (free) | `opencode/hy3-free` |
+  </Tab>
+  <Tab title="Gemini CLI">
+    | Model | id |
+    |-------|----|
+    | Gemini 3.5 Flash (default) | `gemini-3.5-flash` |
+    | Gemini 3.1 Pro | `gemini-3.1-pro-preview` |
+    | Gemini 3.1 Flash Lite | `gemini-3.1-flash-lite-preview` |
+    | Gemini 3 Flash | `gemini-3-flash-preview` |
+    | Gemini 2.5 Pro | `gemini-2.5-pro` |
+    | Gemini 2.5 Flash | `gemini-2.5-flash` |
+
+    Kept in sync with the Gemini rows in the BYOK table so the two pickers don't drift.
+  </Tab>
+</Tabs>
+
+## The models.json patch channel
+
+The bundled tables above are a **floor**. On top of it runs a data-only patch channel that lives outside the app-version updater (`src/lib/remoteConfig.ts`), so a new model can ship by editing `config/models.json` and pushing, without cutting a release.
+
+At startup, `startModelManifestFetch`:
+
+<Steps>
+  <Step title="Fetch">
+    Fetches `https://cdn.jsdelivr.net/gh/tempestai-dev/tempest@main/config/models.json` with `cache: "no-cache"`.
+  </Step>
+  <Step title="Validate">
+    `validate()` turns the untrusted JSON into a manifest patch. Anything malformed is dropped rather than coerced, unknown keys are ignored, and a bad manifest degrades to "no patch" — never a throw.
+  </Step>
+  <Step title="Merge">
+    The patch is merged over the bundled floor: **provider-level replace** plus a **context merge by id**. A provider the patch names wins whole; a provider it omits keeps its bundled list.
+  </Step>
+  <Step title="Cache">
+    The last-good raw manifest is written to `localStorage` under the key `tempest-model-manifest`.
+  </Step>
+</Steps>
+
+<Warning>
+  To add a model through the patch channel you supply that provider's full array — the patch replaces the named provider wholesale. An empty or partial fetch can never blank the UI, though: the merge can only add or replace whole providers, never remove one, so the bundled floor always stands underneath.
+</Warning>
+
+Resolution order: the bundled floor merged with the last-good cache is available before any network runs (new installs get the bundled lists; returning users get the last-fetched lists even offline), and a live fetch overwrites both. The fetch is silent on failure — the bundled or cached floor already works.
+
+The channel is **explicitly unsigned**, by design: it carries display data only — model ids, labels, context numbers — nothing that grants privilege or influences behavior, so it needs no signature. Contrast this with the agent manifest, `config/agents.json`, which is verified with minisign because it carries CLI command strings and auto-approve flags. See [Agent manifest](/agents/manifest).
+
+## Adding a model
+
+<CardGroup cols={2}>
+  <Card title="No release: config/models.json" icon="cloud-arrow-up">
+    Edit `config/models.json` and push to `main`. The jsDelivr-hosted manifest is fetched at startup, validated, and merged over the bundled floor. Update the file's `updatedAt` stamp while you're there.
+  </Card>
+  <Card title="Release: the bundled floor" icon="package">
+    Edit `PROVIDER_MODELS` / `MODEL_CONTEXT` in `src/lib/chatModels.ts`. This changes what ships in the app itself and goes out with the next release — use it for the initial catalog or when a bundled shortlist should change structurally.
+  </Card>
+</CardGroup>
+
+<Callout type="info">
+  BYOK provider keys come from your OS credential manager, entered once in Settings → API Keys — see [API Keys](/settings/api-keys). The experimental Warp backend is separate from all of the above: it has its own provider/model list (currently `openai/gpt-5-nano`, `openai/gpt-4o-mini`, `deepseek/deepseek-v4-flash`, `kimi/kimi-k3`, `openrouter/anthropic/claude-sonnet-4`) and is gated behind Settings → Experimental. See [Chat Pane](/chat/overview).
+</Callout>

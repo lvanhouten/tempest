@@ -1,586 +1,216 @@
 ---
 title: State Management and Runtime Architecture
-description: Complete guide to Tempest's frontend and backend state management, persistence, and synchronization
+description: How Tempest manages frontend stores, the Rust backend, Tauri IPC synchronization, and SQLite persistence
 icon: "database"
 ---
 
 ## Overview
 
-Tempest uses a hybrid state management system: the React frontend manages UI state through custom hooks and stores, while the Rust backend manages PTY sessions and git operations. The two layers synchronize through Tauri IPC commands and persist state to disk for recovery across app restarts.
+Tempest splits state between two layers:
 
-## Frontend State Management
+- **React frontend** — UI state lives in 24 custom store modules under `src/store/`, all built on React's `useSyncExternalStore` hook. No Redux, Zustand, or Jotai.
+- **Rust backend** — process management (PTY sessions, git operations, Docker isolation) lives in `src-tauri/`. The backend holds no persistent state of its own.
 
-### Architecture
+The two layers synchronize through Tauri IPC commands. Anything that must survive a restart is written to a SQLite database by the frontend through `db_*` commands. See [Tauri Commands](/internals/tauri-commands) for the full command reference.
 
-Tempest does not use Redux, Zustand, or Jotai. Instead, it uses a **custom store pattern** built on React's `useSyncExternalStore` hook combined with Node.js event emitter patterns. Each store is a self-contained module with:
+## Persistence layer
 
-- An internal data structure (Map, object, or class)
-- Direct read/write functions (`get*`, `set*`)
-- React hooks (`use*`) that subscribe to changes via `useSyncExternalStore`
-- Optional localStorage fallback for persistence
+All user-facing persistent state lives in a single SQLite database, `tempest.db`, inside the app data directory for the identifier `com.user.tempest`:
 
-This approach keeps store code simple and dependency-free while ensuring components re-render only when their subscribed state changes.
+<Tabs>
+  <Tab title="Windows">
+    `%APPDATA%\com.user.tempest\tempest.db`
+  </Tab>
+  <Tab title="macOS">
+    `~/Library/Application Support/com.user.tempest/tempest.db`
+  </Tab>
+  <Tab title="Linux">
+    `~/.local/share/com.user.tempest/tempest.db`
+  </Tab>
+</Tabs>
 
-### Runtime State (Central Persistence)
+The database has 16 tables:
+
+| Table | Purpose |
+|-------|---------|
+| `projects` | Projects opened in the app, with per-project settings such as worktree order and the Token Intelligence index decision |
+| `branches` | Git branches seen per project |
+| `sessions` | Terminal and agent sessions, keyed to a project and (when applicable) a branch |
+| `layouts` | One saved pane layout per project |
+| `layout_nodes` | The split tree of a layout (`SPLIT` and `SESSION` nodes with direction, size, and order) |
+| `recents` | Recently opened projects |
+| `tabs` | Restored non-terminal tabs (`diff`, `preview`, `editor`, `thread`) |
+| `app_state` | Key/value store for JSON blobs — user preferences live here under the key `runtime` |
+| `threads` | Chat thread boards |
+| `thread_nodes` | Nodes on a thread board, with position, size, and the session they reference |
+| `thread_messages` | Messages within a thread |
+| `thread_edges` | Connections between nodes on a thread board |
+| `automations` | Automation definitions |
+| `automation_runs` | Run history per automation |
+| `automation_prompt_versions` | Versioned prompts saved per automation |
+| `notes` | User notes (title, body, scope) |
+
+Preferences are **not** a forest of files. They are a single JSON blob in `app_state` under the key `"runtime"`, read and written through the `db_load_app_state` and `db_set_app_state` commands and mirrored in `RuntimeState` (below).
+
+### Other on-disk locations
+
+Beyond the main database, a few pieces of state live outside it:
+
+| Location | Contents |
+|----------|----------|
+| `~/.tempest/dbiso.db` | Bookkeeping for [Database Branches](/database-branches/overview) — Docker base images registered per workspace |
+| `~/.tempest/hooks/` | Managed endpoint scripts for the agent lifecycle hooks |
+| `<app-data>/atlas-daemons.json` | Persisted `project_path → pid` map so Atlas daemons can be found (and cleaned up) across restarts |
+| OS keyring, service `tempest-byok` | Provider API keys and task-source credentials, stored via the OS credential vault — never in the database |
+| `<project>/.tempest/` | Per-project, in-repo state: git worktrees and the Token Intelligence index (`.tempest/atlas/`) |
+
+## RuntimeState shape
 
 **File:** `src/lib/runtimeState.ts`
 
-The single source of truth for all persisted state. Stored in `<app-data-dir>/runtime-state.json` and loaded on app startup via `loadRuntimeState()`.
+`RuntimeState` is the shape of the `"runtime"` preferences blob. Every field is optional from the database's point of view — missing keys fall back to defaults:
 
 ```typescript
 export interface RuntimeState {
-  version: number;                          // Schema version for migrations
-  sessions: Record<string, WorktreeSession>;   // All open worktree/root sessions
-  openProjects: StoredProject[];            // Open projects in sidebar
-  recents: RecentWorkspace[];               // Recently opened projects
-  settings: Partial<AppSettings>;           // Terminal and app settings
-  keybindings: Partial<Record<ActionId, Shortcut | null>>;  // Custom key bindings
-  attribution: boolean;                     // Co-author hook enabled flag
-  migrations: Record<string, boolean>;      // Migration tracking
-  tabs: PersistedTab[];                     // Non-terminal tabs (diff, preview, editor)
-  sessionOrder: string[];                   // instanceIds in tab-bar order
-  activeInstanceId: string | null;          // Last focused session's instanceId
-  prompts: Array<...>;                      // Custom and builtin prompts
-  atlasProjects: Record<string, boolean>;   // Project codebase indexing decisions
+  settings: Partial<AppSettings>;
+  keybindings: Partial<Record<ActionId, Shortcut | null>>;
+  attribution: boolean;
+  onboardingComplete: boolean;
+  sessionOrder: string[];          // session ids in tab-bar order
+  activeInstanceId: string | null; // id of the last focused session
+  prompts: Array<{ id: string; title: string; body: string; enabled: boolean; isBuiltin: boolean }>;
+  atlasProjects: Record<string, boolean>; // projectPath → indexed? (Token Intelligence decision)
+  agentConfigs: Record<string, PerAgentConfig>; // agent id → per-agent launch defaults
+  customAgents: RemotePatch[];    // user-added agents, merged over bundled+remote
+  theme?: string;         // active theme name
+  chatProvider?: string;  // last selected chat provider id
+  chatModel?: string;     // last selected chat model id
 }
 ```
 
-**Key functions:**
+Access is centralized in four functions:
 
 | Function | Purpose |
 |----------|---------|
-| `loadRuntimeState()` | Reads runtime-state.json from disk, falls back to localStorage for migration |
-| `getRuntimeState()` | Returns current in-memory state |
-| `setRuntimeState(patch)` | Merges patch into state and persists atomically to disk |
-| `persist()` | Calls `invoke("write_runtime_state", ...)` to write to disk |
+| `loadAppState()` | Reads the `"runtime"` blob from `app_state` and merges it over defaults. Called once at boot |
+| `getRuntimeState()` | Returns the current in-memory state |
+| `setRuntimeState(patch)` | Merges the patch into memory and persists the full blob back to `app_state` |
+| `getAgentConfig(id)` / `setAgentConfig(id, cfg)` | Synchronous accessors over the `agentConfigs` slice so the spawn path never needs a DB round-trip |
 
-All stores read from `getRuntimeState()` on access, so changes are immediately visible across the app.
+## Boot sequence
 
-## Store Modules
-
-### 1. Work State (`src/store/workState.ts`)
-
-Ephemeral per-session work status, never persisted. Detects when an agent finishes executing.
-
-**State held:**
-- Map of sessionId -> `"idle" | "working" | "done"`
-- Separate listener sets per session (prevents O(N²) re-renders)
-
-**Public API:**
-
-| Function | Purpose |
-|----------|---------|
-| `getWorkState(sessionId)` | Returns current state (defaults to "idle") |
-| `setWorkState(sessionId, state)` | Updates state and notifies all listeners |
-| `clearWorkState(sessionId)` | Deletes session from tracking |
-| `useWorkState(sessionId)` | React hook, subscribes to one session |
-| `useWorkStateVersion()` | React hook, incrementing version for cross-session sorting |
-
-**Used by:** TerminalPane to update work badges, Sidebar to sort sessions by activity.
-
-### 2. Worktree Sessions (`src/store/sessions.ts`)
-
-Stores metadata for all terminal and agent sessions running in worktrees or project roots.
-
-**Session schema:**
+`src/main.tsx` hydrates every in-memory mirror from SQLite **in parallel before the first render**:
 
 ```typescript
-export interface WorktreeSession {
-  name: string;                 // User-facing session name
-  agent?: string;               // CLI command hint ("claude", "gemini", etc)
-  conversationId?: string;      // Claude API conversation UUID for --resume
-  instanceId?: string;          // Permanent PTY session ID (minted once)
-  projectId: string;            // Project this session belongs to
-  closed?: boolean;             // Soft-closed (tab closed but can re-open)
-  isRootSession?: boolean;      // true = opened in project root (no worktree)
-  noGit?: boolean;              // true = user chose to proceed without git
-}
+await Promise.all([
+  loadAppState(), loadSessions(), loadProjects(), loadRecents(), loadTabs(),
+  terminalRendererPolicy.initialize(),
+]);
+refreshAgentRegistry(); // rebuild now that customAgents is hydrated
 ```
 
-**Storage key structure:**
+- `loadAppState` — loads the `"runtime"` preferences blob
+- `loadSessions` / `loadProjects` — hydrate from the `db_load` snapshot (projects, branches, sessions)
+- `loadRecents` / `loadTabs` — hydrate from `db_load_recents` and `db_load_tabs`
+- `terminalRendererPolicy.initialize()` — decides WebGL vs. canvas rendering before the first terminal mounts
 
-- Worktree sessions: keyed by worktree path (e.g., `/path/to/project/.tempest/my-workspace`)
-- Root sessions: keyed by `<projectPath>::root::<sessionId>` (ROOT_SESSION_PREFIX) to avoid collisions
-- Multiple root sessions can coexist in the same project
+Only after all six resolve does React render, so no component ever sees a half-hydrated store.
 
-**Public API:**
+## Store modules
 
-| Function | Purpose |
-|----------|---------|
-| `getWorktreeSession(worktreePath)` | Fetch session by path |
-| `rootSessionKey(projectPath, sessionId)` | Build a root-session store key |
-| `isRootSessionKey(key)` | Check if a key is a root session |
-| `rootSessionIdFromKey(key)` | Extract sessionId from a root-session key |
-| `getRootSessionsForProject(projectPath)` | Get all root sessions for a project |
-| `saveWorktreeSession(path, session)` | Persist a session |
-| `removeWorktreeSession(path)` | Delete a session |
-| `markWorktreeSessionClosed(path)` | Soft-close (set closed=true) |
-| `markWorktreeSessionOpen(path)` | Re-open (set closed=false) |
-| `dedupeRootSessions(projectPath)` | Merge duplicate root sessions from the pre-fix restore bug |
-| `pruneOrphanedSessions(validPaths)` | Remove sessions for deleted projects |
+All 24 store modules live in `src/store/`. Each is a singleton built on `useSyncExternalStore`: components subscribe through a `use*` hook and re-render only when their slice changes.
 
-### 3. App Settings (`src/store/appSettings.ts`)
-
-Terminal appearance and behavior settings, merged with hardcoded defaults.
-
-```typescript
-export interface AppSettings {
-  terminalFontSize: number;            // Default: 13
-  terminalFontFamily: string;          // Default: "Geist Mono"
-  terminalCursorStyle: "block" | "bar" | "underline";  // Default: "block"
-  terminalCursorBlink: boolean;        // Default: true
-  terminalScrollback: number;          // Default: 1000
-  sidebarFontSize: number;             // Default: 14
-  branchPrefix: string;                // Auto-prefix for new branches
-  commitMessageTemplate: string;       // Default: "Agent work"
-  atlasEnabled: boolean;               // Enable codebase indexing
-  atlasAutoIndex: boolean;             // Auto-index new projects
-}
-```
-
-**Public API:**
-
-| Function | Purpose |
-|----------|---------|
-| `getSettings()` | Fetch merged settings (defaults + runtime override) |
-| `updateSetting(key, value)` | Update a single setting |
-| `useSettings()` | React hook, subscribes to changes |
-
-### 4. Keybindings (`src/store/keybindings.ts`)
-
-Customizable keyboard shortcuts, merged with ACTION_DEFS defaults.
-
-```typescript
-export type ActionId =
-  | "toggleTheme" | "openSettings" | "toggleLeftSidebar"
-  | "toggleRightSidebar" | "openProject" | "newWorkspace"
-  | "closeTab" | "nextTab" | "prevTab" | "broadcast"
-  | "splitPaneV" | "splitPaneH" | "openQueue";
-
-export interface Shortcut {
-  key: string;      // e.g., "T", "\\", "ArrowUp"
-  ctrl: boolean;
-  shift: boolean;
-  alt: boolean;
-}
-```
-
-Defaults are defined in `DEFAULTS` record and merged at access time. Custom bindings override defaults.
-
-**Public API:**
-
-| Function | Purpose |
-|----------|---------|
-| `getBindings()` | Return merged bindings (defaults + custom) |
-| `setBinding(action, shortcut)` | Override a keybinding |
-| `resetBinding(action)` | Revert to default |
-| `resetAllBindings()` | Clear all customizations |
-| `useKeybindings()` | React hook, subscribes to all bindings |
-| `matchesEvent(shortcut, KeyboardEvent)` | Check if an event matches a shortcut |
-| `formatShortcut(shortcut)` | Format for display (e.g., "Ctrl+Shift+T") |
-| `shortcutFromEvent(e)` | Extract shortcut from KeyboardEvent |
-
-### 5. Attribution (`src/store/attribution.ts`)
-
-Simple flag for whether co-author attribution hook is enabled.
-
-**Co-author line:**
-```
-Co-authored-by: Tempest <tempestai.dev@gmail.com>
-```
-
-**Public API:**
-
-| Function | Purpose |
-|----------|---------|
-| `getAttribution()` | Boolean flag |
-| `setAttribution(value)` | Enable/disable |
-| `useAttribution()` | React hook |
-
-### 6. Open Projects (`src/store/openProjects.ts`)
-
-List of projects shown in the sidebar.
-
-```typescript
-export interface StoredProject {
-  id: string;         // UUID
-  name: string;       // Display name
-  path: string;       // File system path
-  expanded: boolean;  // Sidebar tree expansion state
-}
-```
-
-**Public API:**
-
-| Function | Purpose |
-|----------|---------|
-| `getOpenProjects()` | Fetch list |
-| `saveOpenProjects(projects)` | Replace entire list |
-
-### 7. Recent Workspaces (`src/store/recents.ts`)
-
-Ordered list of recently opened projects.
-
-```typescript
-export interface RecentWorkspace {
-  id: string;
-  name: string;
-  path: string;
-  lastOpened: string;  // ISO 8601 timestamp
-}
-```
-
-**Public API:**
-
-| Function | Purpose |
-|----------|---------|
-| `getRecents()` | Fetch recent list (max 50) |
-| `addRecent(ws)` | Add or move to top |
-| `removeRecent(path)` | Remove a recent |
-
-### 8. Message Queue (`src/store/messageQueue.ts`)
-
-Ephemeral queue for messages displayed in a UI popover, never persisted.
-
-```typescript
-export interface QueueItem {
-  id: string;
-  text: string;
-}
-```
-
-Per-session queues: each session can have its own queue independently.
-
-**Public API:**
-
-| Function | Purpose |
-|----------|---------|
-| `enqueue(sessionId, text)` | Add message |
-| `dequeue(sessionId)` | Remove and return first message |
-| `removeFromQueue(sessionId, itemId)` | Remove specific item |
-| `clearQueue(sessionId)` | Empty queue |
-| `getQueue(sessionId)` | Fetch messages |
-| `useQueue(sessionId)` | React hook |
-
-### 9. Prompts (`src/store/prompts.ts`)
-
-Builtin and user-defined prompts for common tasks (Review, Tests, Security, Explain, Commit).
-
-```typescript
-export interface PromptEntry {
-  id: string;
-  title: string;
-  body: string;
-  enabled: boolean;
-  isBuiltin: boolean;
-}
-```
-
-Builtin prompts are hardcoded and auto-inserted if missing (supports new builtins in app updates). Custom prompts have `id: "custom-<uuid>"`.
-
-**Public API:**
-
-| Function | Purpose |
-|----------|---------|
-| `getPrompts()` | Fetch all prompts (loaded from runtimeState) |
-| `usePrompts()` | React hook |
-| `addPrompt(title, body)` | Create custom prompt |
-| `updatePrompt(id, patch)` | Modify title/body/enabled |
-| `deletePrompt(id)` | Delete custom prompt or disable builtin |
-| `resetPrompt(id)` | Restore builtin to defaults |
-| `clonePrompt(id)` | Create copy of a prompt |
-| `reorderPrompts(fromId, toId, side)` | Drag-and-drop reordering |
-| `isBuiltinModified(prompt)` | Check if builtin differs from default |
-
-### 10. Session Manager (`src/store/sessionManager.ts`)
-
-Singleton that detects when agent sessions finish by monitoring PTY output, escape sequences, and terminal title changes. Ephemeral, never persisted.
-
-**Detection signals monitored:**
-
-| Signal | Meaning |
+| Module | Purpose |
 |--------|---------|
-| OSC 9 (iTerm notification) | Agent turn complete |
-| `OSC 9;4;<state>` (Windows Terminal progress) | State 0 = done, 1-4 = working |
-| OSC 133 B,D (FinalTerm shell-integration) | Prompt ready, command finished |
-| OSC 777 (rxvt-unicode) | Attention/turn complete |
-| DEC mode 2004 (bracketed paste) | Enabled = prompt ready, disabled = busy |
-| DEC mode 1049 (alt screen buffer) | Leaving alt screen = app exited |
-| Title regex (agent-specific) | Claude: "✳" idle, spinner busy; Gemini: "◇" idle, "✦✋" busy |
+| `appSettings` | Terminal and app settings, merged over hardcoded defaults |
+| `keybindings` | Custom keyboard shortcuts, merged over the built-in defaults |
+| `sessionManager` | Singleton that watches PTY output, escape sequences, and terminal titles to detect when an agent finishes |
+| `sessions` | Metadata for worktree and project-root sessions, mirrored from the `sessions` table |
+| `openProjects` | Projects shown in the sidebar, backed by the `projects` table |
+| `recents` | Recently opened projects, backed by the `recents` table |
+| `tabs` | Non-terminal tabs (diff, preview, editor, thread), backed by the `tabs` table |
+| `worktrees` | Runtime mirror of the per-project `.tempest/*` disk scan plus a git-repo hint; read by the mobile projector |
+| `workState` | Per-session `idle` / `working` / `done` status |
+| `nodeActivity` | Ephemeral activity state for workspace nodes |
+| `messageQueue` | Per-session queue of messages shown in the UI popover |
+| `automations` | Automation definitions and schedule state over the `automations` tables |
+| `agentHooks` | Receiver for the `agent-hook` event; feeds precise agent lifecycle state into `sessionManager` |
+| `agentAvailability` | Which agent CLIs are available on this machine |
+| `prompts` | Builtin and custom prompts, persisted in the runtime blob |
+| `attribution` | Whether the co-author attribution hook is enabled |
+| `islandNotifs` | Notification feed for the island UI (permission requests, completions) |
+| `quotas` | Polls `quota_read_all` on a five-minute cadence and exposes provider usage |
+| `updates` | App update checks via the Tauri updater plugin |
+| `threads` | Thread boards, backed by the `threads` tables |
+| `threadMessages` | Messages within threads, backed by the `thread_messages` table |
+| `mobilePairings` | Pairing state with the mobile companion |
+| `mobileControlledSessions` | Sessions currently shared with the mobile companion |
+| `reviewComments` | Review comment state for the diff and PR review surfaces |
 
-**Heuristic timers:**
+## Ephemeral vs. persisted
 
-- **QUIET_MS (5000ms):** If no output received for 5s, mark done (unless title says busy or insufficient bytes received)
-- **TURN_STARTED_BYTES (200):** Minimum bytes required before heuristic timers fire (gates false positives during thinking window)
-- **DEAD_ZONE_MS (300ms):** After user presses Enter, suppress done signals to avoid echo false-positives
-- **CEIL_MS (12000ms):** Hard ceiling; if still working after 12s, force done (safety net for keepalive loops)
+| Layer | Examples | Fate |
+|-------|----------|------|
+| Memory-only | `workState`, `nodeActivity`, `messageQueue` | Rebuilt or discarded on restart |
+| SQLite | `sessions`, `tabs`, `threads`, `threadMessages`, `automations`, `notes`, `recents`, `openProjects` | Survive restarts |
+| Runtime blob | `settings`, `keybindings`, `prompts`, `agentConfigs`, `customAgents`, `theme` | Survive restarts inside `app_state` |
 
-**Architecture:**
+The Message Queue is deliberately **not** persisted: it is a short-lived handoff surface for typed-but-not-sent messages, and queueing stale text across restarts would surprise the user. Work state, likewise, is re-derived live from PTY output and agent hooks.
 
-```typescript
-class SessionManager {
-  register(sessionId, channel, isAgent, onDone?, onChunk?, agentHint?)
-  unregister(sessionId)
-  attach(sessionId, onData)        // Called by TerminalPane on mount
-  detach(sessionId, onData)        // Called by TerminalPane on unmount
-  markUserInput(sessionId)         // Called when user presses Enter
-  updateTitle(sessionId, title)    // Called by term.onTitleChange()
-  setOnChunk(sessionId, onChunk)   // Update per-chunk callback
-}
+## Project settings and tempest.yml
 
-export const sessionManager = new SessionManager();
-```
+Per-project security settings are edited in the Project Settings panel (`ProjectSettingsPanel/useProjectSettings.ts`) and grouped into seven sections:
 
-### 11. Runtime State (Lib) (`src/lib/runtimeState.ts`)
+| Group | Fields |
+|-------|--------|
+| `sandbox` | `mode: off \| monitor \| enforce` |
+| `network` | `policy: permissive \| restrictive`, `allowHosts`, `blockHosts` |
+| `filesystem` | `rwPaths`, `roPaths` |
+| `permissions` | `allowSkipPermissions`, `allowRepoHooks` |
+| `agents` | `permitted` (which agent CLIs may launch) |
+| `database` | `isolationEnabled` |
+| `resources` | `maxMemoryMb`, `maxProcesses`, `maxDiskWriteMb`, `cpuWeight` |
 
-Central reader/writer for all persisted state. Handles localStorage migration on first load.
+A project can also commit a `tempest.yml`. Because the file arrives with the code, it is merged in the **tightening direction only** (`clampSecurity` in `src/lib/tempestConfig.ts`): a repo can lock itself down further than the user's panel, never loosen it. Sandbox mode only escalates, blocklists only grow, allowlists only shrink, quotas only shrink. The config's `env` block is additionally filtered through a denylist of loader and DB-isolation variables (`PATH`, `NODE_OPTIONS`, `LD_PRELOAD`, `DATABASE_URL`, and similar), so a hostile repo cannot use environment variables for code execution. Full schema on the [tempest.yml](/tempest-yml) page.
 
-**Initialization:**
+## Migration notes
 
-```typescript
-export async function loadRuntimeState(): Promise<void>
-```
+Earlier versions of Tempest persisted state in browser `localStorage`. That era is over: legacy keys were migrated into SQLite at startup and are no longer read. Current builds keep exactly three `localStorage` uses, all deliberate and all UI-local:
 
-On first app launch, tries to read from `write_runtime_state` (Rust), then falls back to localStorage keys:
+| Key | Used by | Purpose |
+|-----|---------|---------|
+| `tempest-github-token` | `PrDialog` | GitHub token for the PR dialog |
+| `tempest:tasks-page:v1` | `TasksPage` | Task list filter state |
+| `tempest-run-custom:{cwd}` | `RightSidebar` | Custom Run commands, per working directory |
 
-| localStorage key | RuntimeState field |
-|------------------|-------------------|
-| `tempest-worktree-sessions` | `sessions` |
-| `tempest-open-projects` | `openProjects` |
-| `tempest-recents` | `recents` |
-| `tempest-app-settings` | `settings` |
-| `tempest-keybindings` | `keybindings` |
-| `tempest-attribution` | `attribution` |
+Everything else — settings, sessions, tabs, threads, prompts, agent configs — belongs to `tempest.db` now.
 
-After migration, all state moves to disk and localStorage is no longer used.
+## Example: reading and writing preferences
 
-**Persistence:**
-
-Every call to `setRuntimeState(patch)` immediately:
-1. Merges patch into in-memory `_state`
-2. Calls `persist()` which invokes `write_runtime_state` over Tauri IPC
-3. Waits for Rust to write atomically (temp file, then rename)
-
-This ensures state survives app crashes.
-
-## Backend State (Rust)
-
-### Architecture
-
-The Rust backend (`src-tauri/src/lib.rs`) uses Tauri's state management system with two main persistent structures:
-
-| Structure | Purpose |
-|-----------|---------|
-| `PtyState(Arc<DashMap<String, Arc<PtySession>>>)` | Active PTY sessions (shell processes) |
-| `ZenState(Mutex<HashMap<String, (String, String)>>)` | Zen window (secondary window) metadata |
-
-No other state is kept in memory; all config flows through Frontend -> Tauri command -> Rust subprocess.
-
-### PtyState (Concurrent PTY Registry)
-
-```rust
-pub struct PtyState(pub(crate) Arc<DashMap<String, Arc<PtySession>>>);
-
-struct PtySession {
-  writer: Mutex<Box<dyn Write + Send>>,           // stdin to PTY
-  master: Mutex<Box<dyn portable_pty::MasterPty + Send>>,  // master side of PTY
-  _slave: Mutex<Box<dyn portable_pty::SlavePty + Send>>,   // slave side (slave end of PTY)
-  child:  Mutex<Box<dyn portable_pty::Child + Send + Sync>>, // shell process
-  cwd: String,                                    // working directory
-}
-```
-
-**DashMap:** Lock-free concurrent HashMap from the `dashmap` crate. Allows multiple threads to read/write simultaneously without global locks. Each PTY session is wrapped in Arc for cheap cloning across threads.
-
-**Lifecycle:**
-
-1. Frontend calls `create_pty_session(...)` with a unique `session_id`
-2. Rust spawns PTY, starts background reader thread
-3. PTY is inserted into DashMap under `session_id`
-4. Frontend can then call `write_to_pty(session_id, data)` or `resize_pty(session_id, ...)`
-5. When tab closes, frontend calls `close_pty_session(session_id)` or `close_and_remove_worktree(session_id, ...)`
-6. Rust removes entry from DashMap, kills child process, waits for exit, cleans up
-
-**Process tree termination:**
-
-On Windows, `portable-pty` creates a job object that includes the shell and all descendants (agent CLI process, npm, git, etc). Killing the job kills everything atomically.
-
-On Unix, killing the shell process sends SIGTERM to its children. Any orphaned agent processes are force-killed via `kill -9` if `.tempest-pid` persists across app restart.
-
-### ZenState (Secondary Windows)
-
-```rust
-pub struct ZenState(pub Mutex<std::collections::HashMap<String, (String, String)>>);
-```
-
-Maps window label (e.g., `"zen-1234567890"`) to `(project_path, project_name)`. Used to initialize the React component in a secondary zen window.
-
-Populated by `open_zen_window()`, read by `get_zen_config()`, cleared when the window closes.
-
-## State Synchronization
-
-### Frontend to Backend
-
-**Pattern:** Frontend -> `invoke(command, params)` -> Rust -> returns result
-
-All backend operations are stateless: Rust doesn't cache anything. The frontend sends complete information (paths, settings) on each command.
-
-**Examples:**
-
-| Frontend | Rust Backend | State Modified |
-|----------|--------------|----------------|
-| `createWorktree(path, name)` | `create_terminal_worktree` | Worktree dir created |
-| `createPtySession(...)` | `create_pty_session` | PTY added to DashMap |
-| `writeToTerminal(sessionId, data)` | `write_to_pty` | Data sent to PTY stdin |
-| `closePtySession(sessionId)` | `close_pty_session` | PTY removed from DashMap |
-
-### Backend to Frontend
-
-**Pattern 1: Poll-based (Tauri commands)**
-
-Frontend calls Rust command, waits for response:
+Stores read settings through the runtime state; a write persists synchronously to memory and asynchronously to SQLite:
 
 ```typescript
-const branch = await invoke<string>("get_git_branch", { path });
+import { getRuntimeState, setRuntimeState } from "../lib/runtimeState";
+
+const fontSize = getRuntimeState().settings.terminalFontSize ?? 13;
+const theme = getRuntimeState().theme ?? "dark";
+
+// Merge one patch; the whole blob is written back to app_state.
+setRuntimeState({ theme: "noir" });
 ```
 
-**Pattern 2: Push-based (Event channels)**
-
-PTY output flows via a dedicated `Channel<PtyOutputPayload>` passed at PTY creation:
+Under the hood this is two Tauri commands over the `app_state` table:
 
 ```typescript
-const channel = new Channel<{ session_id: string; data: string }>();
-channel.onmessage = (event) => {
-  const { session_id, data } = event.payload;
-  // Update terminal state
-};
-await invoke("create_pty_session", {
-  session_id,
-  cwd,
-  rows, cols,
-  command, args,
-  on_event: channel,
+import { invoke } from "@tauri-apps/api/core";
+
+// Read every blob (returns [key, value] rows).
+const rows = await invoke<[string, string][]>("db_load_app_state");
+const state = JSON.parse(new Map(rows).get("runtime") ?? "{}");
+
+// Write one blob back.
+await invoke("db_set_app_state", {
+  key: "runtime",
+  value: JSON.stringify({ ...state, theme: "noir" }),
 });
 ```
-
-Rust thread reads from PTY master and sends each chunk as `PtyOutputPayload`, O(1) directly to this session's channel (no broadcast, no filtering).
-
-### Storage Layer
-
-**Frontend persistence:**
-
-- All frontend state lives in `RuntimeState` (typed, centralized)
-- Persisted to `<app-data-dir>/runtime-state.json` atomically via `write_runtime_state`
-- Loaded on app startup via `loadRuntimeState`
-- Falls back to localStorage for migration from older app versions
-
-**Backend persistence:**
-
-- No persistent backend state (stateless design)
-- Git state is stored in `.git/` directories (managed by git CLI)
-- PTY session state exists only while the process runs
-- Process IDs persisted to `.tempest-pid` sidecar files inside worktrees for crash recovery
-
-## localStorage Keys (Deprecated)
-
-For reference, these are no longer used (migrated to RuntimeState):
-
-| Key | Type | Purpose |
-|-----|------|---------|
-| `tempest-worktree-sessions` | JSON Record | All worktree sessions |
-| `tempest-open-projects` | JSON array | Sidebar projects |
-| `tempest-recents` | JSON array | Recent workspaces |
-| `tempest-app-settings` | JSON object | Terminal settings |
-| `tempest-keybindings` | JSON object | Custom key bindings |
-| `tempest-attribution` | "true" \| "false" | Co-author enabled |
-
-On first app load with the new version, `loadRuntimeState` attempts to read from disk. If that fails, it reads from localStorage, merges everything into `RuntimeState`, and persists atomically to disk. Subsequently, localStorage is never read again.
-
-## Session State Deep Dive
-
-### Complete Session Lifecycle
-
-1. **Creation:** User clicks "New Workspace" or opens a project, frontend calls `createWorktree(projectPath, name)`
-   - Rust creates `.tempest/<name>` git worktree
-   - Returns worktree path
-
-2. **Storage:** Frontend saves session to RuntimeState:
-   ```typescript
-   const session: WorktreeSession = {
-     name: "feature-x",
-     projectId: project.id,
-     isRootSession: false,
-     // No conversationId or agent yet
-   };
-   saveWorktreeSession(worktreePath, session);
-   ```
-
-3. **PTY Spawn:** Frontend calls `createPtySession(sessionId, cwd, ...)`
-   - Rust opens PTY, saves PID to `.tempest-pid`
-   - Starts background reader thread streaming output
-
-4. **Agent Launch:** If user runs `claude` in shell, sessionManager detects OSC title changes
-   - Sets `workState` to "working"
-   - Stores conversationId (extracted from agent output)
-
-5. **Completion:** Agent finishes, signals OSC/DEC sequence
-   - sessionManager detects signal or timeout
-   - Sets `workState` to "done"
-   - Optional: frontend auto-saves session with timestamp
-
-6. **Closure:** User closes tab
-   - Frontend calls `closeWorktreeSession(worktreePath)`
-   - Sets `closed: true` in RuntimeState (soft close)
-   - PTY is still alive (can re-open)
-
-7. **Deletion:** User clicks "Delete" in sidebar
-   - Frontend calls `closeAndRemoveWorktree(sessionId, repoPath, worktreePath)`
-   - Rust kills PTY, waits for process exit, removes worktree dir
-   - Frontend removes session from RuntimeState
-
-### Restore on App Restart
-
-At app startup:
-
-1. `loadRuntimeState()` reads disk, populating sessions
-2. For each open (non-closed) worktree session:
-   - Check if `.tempest-pid` exists
-   - If yes, process was orphaned; kill it via `taskkill /F /T` (Windows) or `kill -9` (Unix)
-3. For each root session:
-   - Call `dedupeRootSessions(projectPath)` to merge duplicates from old restore bug
-   - Restore ghost tabs for root sessions that were closed but are being restored
-
-### Project State Tracking
-
-**Current project path:** Stored implicitly through:
-- `activeInstanceId` in RuntimeState (which session tab is focused)
-- That session's `WorktreeSession.projectId`
-- That project's `StoredProject.path`
-
-**Project detection:**
-- Sidebar lists all `StoredProject` entries
-- Frontend tracks open projects via `getOpenProjects()` / `saveOpenProjects(...)`
-- Projects are added via folder picker in welcome screen, persisted to RuntimeState
-
-**Project cleanup:**
-- On app startup, `pruneOrphanedSessions(validPaths)` removes sessions for deleted projects
-- Prevents stale entries accumulating
-
-## Key Design Decisions
-
-1. **No Redux/Zustand:** Custom stores are simpler, smaller, and need no external dependencies for this use case.
-
-2. **useSyncExternalStore:** Ensures React re-renders only when subscribed state changes, avoiding O(N²) updates across hundreds of sessions.
-
-3. **RuntimeState centralization:** Single source of truth makes state debugging and persistence easy.
-
-4. **Atomic disk writes:** Every state change persists atomically (temp file + rename), preventing corruption on crash.
-
-5. **Stateless Rust backend:** No memory-resident app state reduces crashes and restart costs.
-
-6. **DashMap for PTY sessions:** Lock-free concurrent HashMap allows many PTY read/write operations to proceed in parallel without global locks.
-
-7. **Lazy initialization of merged defaults:** Keybindings and settings merge defaults on access, so app updates can add new defaults without migration code.
-
-8. **Ephemeral vs persistent:** Work state, queue, WebGL pool are ephemeral (lost on restart). Everything else lives in RuntimeState and survives.
-

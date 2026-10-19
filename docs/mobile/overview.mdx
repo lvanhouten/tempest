@@ -1,0 +1,67 @@
+---
+title: "Mobile Pairing (Beta)"
+description: "Pair your phone with the desktop app and drive Tempest sessions over an end-to-end encrypted connection — terminals, prompts, and permission approvals included."
+icon: "smartphone"
+---
+
+# Mobile Pairing (Beta)
+
+<Callout type="info">
+Mobile pairing is in beta. The relay is a dumb frame router — it forwards ciphertext and nothing else. No Tempest server ever sees plaintext.
+</Callout>
+
+Mobile pairing links your phone to the desktop app. From the phone you can see your sessions, drive [terminals](/terminal/overview), enqueue prompts into the Message Queue, and approve permission requests.
+
+The phone speaks the `@tempest/core` RPC surface:
+
+| Methods | What they do |
+|---------|--------------|
+| `session.list`, `session.get`, `session.open`, `session.close`, `session.hop` | Discover and control sessions |
+| `queue.list`, `queue.enqueue`, `queue.remove`, `queue.clear`, `queue.reorder` | Manage the Message Queue |
+| `agent.send`, `agent.interrupt`, `agent.stop`, `agent.subscribe`, `agent.unsubscribe`, `agent.resize` | Drive an agent session |
+| `permission.list`, `permission.decide` | Review and answer permission requests |
+| `protocol.hello` | Handshake |
+| `push.register` | Register for push notifications |
+
+The server pushes events back: `session.updated`, `agent.output`, `permission.pending`, and `session.controllerYielded`.
+
+## Pairing
+
+<Steps>
+  <Step title="Open Settings → Mobile on the desktop app">
+    The Mobile settings page is the pairing home.
+  </Step>
+  <Step title="Scan the QR code with the Tempest mobile app">
+    The QR expires after 60 seconds, so scan it while it is fresh.
+  </Step>
+  <Step title="Verify the fingerprint">
+    The handshake exchanges X25519 keypairs. Check that the fingerprint shown on the phone matches the one on the desktop before confirming.
+  </Step>
+  <Step title="Manage the device">
+    Paired devices appear in a list where you can rename or forget them.
+  </Step>
+</Steps>
+
+## Transport modes
+
+Set the `TEMPEST_MOBILE_TRANSPORT` environment variable to choose how the phone reaches the desktop:
+
+| Mode | Behavior |
+|------|----------|
+| `lan` (default) | Phone and desktop on the same Wi-Fi. The desktop binds a local WebSocket router and advertises its LAN IP. |
+| `tunnel` | A bundled cloudflared sidecar exposes a random `wss://<random>.trycloudflare.com/ws` quick tunnel for off-network use. |
+
+<Callout type="warning">
+LAN mode requires the phone and desktop to be on the same network. Tunnel mode needs internet access and spawns a cloudflared sidecar process.
+</Callout>
+
+## Security model
+
+- End-to-end encrypted with NaCl secretbox. The session key is derived from the X25519 handshake via `box.before`.
+- Every frame is `{ n, c }` — a nonce plus the boxed ciphertext.
+- The relay only ever sees ciphertext.
+- One laptop and one phone per session.
+- Protocol version 1.
+- While a phone drives a session, the desktop pane's stdin is gated.
+
+On the desktop side, two Tauri commands manage the relay: `start_pairing_relay` and `stop_pairing_relay`. The mobile app is Expo-based and lives in `apps/mobile`.

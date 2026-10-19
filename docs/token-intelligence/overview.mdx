@@ -15,7 +15,7 @@ Atlas is a semantic code intelligence engine that:
 - Builds a **local knowledge graph** from your entire codebase
 - Extracts **code structure** (functions, classes, variables, imports, calls, types)
 - Models **relationships** between symbols (calls, references, extensions, implementations)
-- Stores everything in an **SQLite database** at `.atlas/atlas.db`
+- Stores everything in an **SQLite database** at `.tempest/atlas/atlas.db`
 - Runs **100% locally** with no cloud processing or data transmission
 - Exposes a **Model Context Protocol (MCP) server** so agents get surgical context
 
@@ -33,8 +33,8 @@ Unlike file-based context, which requires sending entire files to LLMs, Atlas pr
 When you enable Token Intelligence for a project, Tempest:
 
 1. Spawns `node .../atlas/dist/mcp/server-entry.js --init --path <project>`
-2. Initializes the `.atlas/` directory structure
-3. Creates an empty SQLite database at `.atlas/atlas.db`
+2. Initializes the `.tempest/atlas/` directory structure
+3. Creates an empty SQLite database at `.tempest/atlas/atlas.db`
 4. Begins scanning the project root
 
 The scan phase:
@@ -84,10 +84,9 @@ Atlas uses **tree-sitter** (with WebAssembly grammars) to parse source files in 
 
 **Extraction performance:**
 
-- Typical scan: 100-1000 files/second (I/O bound)
-- Typical parse: 1000-10000 files/second (CPU bound, parallelized)
-- A 10k-file project typically indexes in 5-15 minutes on first run
-- Database size: ~50-500 MB depending on complexity (heavily indexed repos on the high end)
+- Parsing runs in parallel across a worker-thread pool
+- Benchmarked on microsoft/vscode: 12,693 files (148.68 MB of source) index in about 2.3 seconds wall — roughly 5,590 files/second end-to-end — producing a ~371 MB SQLite database
+- Database size: tens of MB for small projects, up to a few hundred MB+ for very large repos
 
 **Progress updates:**
 
@@ -125,24 +124,24 @@ This creates the actual edges in the graph. Once resolved, agents can traverse:
 - "Which routes are handled by this controller?"
 - "What symbols are exported from this module?"
 
-## The AtlasIndexToast
+## The AtlasIndexModal
 
-The **AtlasIndexToast** is a React component shown in Tempest's UI during initial indexing:
+The **AtlasIndexModal** (`src/components/AtlasIndexModal.tsx`) is the dialog Tempest shows during initial indexing:
 
 ```tsx
-<AtlasIndexToast projectPath={...} projectName={...} onDismiss={...} />
+<AtlasIndexModal path={...} onCancel={...} onComplete={...} />
 ```
 
 **Behavior:**
 
-- Polls every 2 seconds for the existence of `.atlas/atlas.db` in the project
-- Shows a spinner and "Indexing project" message while indexing runs
-- Once the database file appears (indexing complete), displays "Index ready" and auto-dismisses after 2.5 seconds
-- Users can manually dismiss at any time
+- Polls the `check_atlas_db` Tauri command every 2 seconds to see whether `.tempest/atlas/atlas.db` exists in the project
+- Shows a spinner and an "Indexing your codebase" message, surfacing each `atlas:log` line as it arrives
+- Once the database is present (indexing complete), shows "Codebase indexed" and auto-dismisses after about 1.5 seconds
+- A Cancel button lets users abort at any time (disabled once done)
 
 **Why this works:**
 
-The Tauri background thread spawns the Node.js indexing process (`server-entry.js --init`) detached from the Tempest process. The toast doesn't wait for the process to exit; it just watches for the database file to materialize, which happens early in the indexing run. The Tauri backend also streams stdout/stderr from the indexing process as `atlas:log` events so users see real-time progress in the logs panel.
+The Tauri background thread spawns the Node.js indexing process (`server-entry.js --init`) detached from the Tempest process. The modal doesn't wait for the process to exit; it polls `check_atlas_db` until the database file materializes, which happens early in the indexing run. The Tauri backend also streams stdout/stderr from the indexing process as `atlas:log` events, which the modal displays line by line.
 
 ## How Atlas Reduces Token Usage
 
@@ -175,10 +174,10 @@ With Atlas, agents use structured tools:
 
 ## Data Storage
 
-All Atlas data lives in the project at `.atlas/`:
+All Atlas data lives in the project at `.tempest/atlas/`:
 
 ```
-.atlas/
+.tempest/atlas/
   atlas.db          # Main SQLite database
   atlas.db-wal      # WAL (write-ahead log) for concurrent access
   atlas.db-shm      # Shared memory for WAL synchronization
@@ -251,15 +250,15 @@ Atlas uses SQLite in **WAL (Write-Ahead Log) mode**:
 - Small project (< 1k files): 10-50 MB
 - Medium project (1k-10k files): 50-200 MB
 - Large project (10k-100k files): 200-500 MB
-- Very large (100k+ files): 500 MB-2+ GB
+- Very large (100k+ files): several hundred MB and up
 
 Size scales roughly with total symbol count, not file count.
 
 ## Per-Project Indexing
 
-Each project has its own `.atlas/` directory and database:
+Each project has its own `.tempest/atlas/` directory and database:
 
-- Switching to a new project workspace automatically points Atlas to its `.atlas/`
+- Switching to a new project workspace automatically points Atlas to its `.tempest/atlas/`
 - Multiple projects can be indexed simultaneously in separate processes
 - The MCP daemon (when running) maintains one connection per project
 - No shared index across projects
@@ -277,10 +276,10 @@ Indexing happens in three scenarios:
 
 When you enable Token Intelligence in Tempest:
 
-1. Tempest detects no `.atlas/` directory
-2. Spawns `atlas init --path <project>`
-3. Wauri AtlasIndexToast polls for `.atlas/atlas.db`
-4. Background indexing runs, user is notified via toast
+1. Tempest detects no `.tempest/atlas/` directory
+2. Spawns `node .../atlas/dist/mcp/server-entry.js --init --path <project>`
+3. The AtlasIndexModal polls `check_atlas_db` for `.tempest/atlas/atlas.db`
+4. Background indexing runs, and the user is notified via the modal
 
 ### Automatic (on file changes)
 
@@ -294,38 +293,31 @@ You can pause/resume watching programmatically via the Rust backend.
 
 ### Manual (via CLI or API)
 
+Atlas ships as the npm package `@usetempest/atlas`, staged into the app at `src-tauri/resources/atlas/` by `scripts/install-atlas.mjs` at postinstall. Its only entry point is `dist/mcp/server-entry.js`:
+
 ```bash
-# Full re-index (discards old database, starts fresh)
-atlas index --path <project>
+# Initial index (one-time; this is what Tempest's automatic path runs)
+node <atlas>/dist/mcp/server-entry.js --init --path <project>
 
-# Sync only (incremental update)
-atlas sync --path <project>
+# Serve the MCP server for an agent (direct, proxy, or daemon mode)
+node <atlas>/dist/mcp/server-entry.js --path <project>
 
-# Initialize if not already indexed
-atlas init --path <project>
+# Download the semantic-search model (~25 MB MiniLM) into a cache directory
+node <atlas>/dist/mcp/server-entry.js --download-model --model-cache <dir>
+
+# Enable hybrid retrieval (semantic + keyword) on the next server start
+node <atlas>/dist/mcp/server-entry.js --semantic --model-cache <dir>
 ```
 
-From TypeScript:
+From TypeScript, use the programmatic API:
 
 ```ts
-import Atlas from '@tempest/atlas';
+import { Atlas } from "@usetempest/atlas";
 
-const atlas = await Atlas.open('/path/to/project');
-
-// Full re-index (clears database, reindexes everything)
-await atlas.indexAll({ 
-  onProgress: (progress) => console.log(progress),
-  verbose: true 
-});
-
-// Incremental sync (only changed files)
-await atlas.sync();
-
-// Check if index is stale
-if (atlas.isIndexStale()) {
-  console.log('Index was built with an older extraction engine');
-}
+const atlas = await Atlas.init(projectPath, { index: true });
 ```
+
+To rebuild from scratch, remove the project's `.tempest/atlas/` directory (the `remove_atlas_index` Tauri command does this) and run the `--init` invocation again. Incremental updates for everyday edits are handled automatically by the file watcher described above.
 
 ### When to Re-index
 
@@ -334,7 +326,7 @@ Re-index when:
 - Enabling Token Intelligence for the first time
 - After major framework/dependency updates (npm install, pip install)
 - After local branch changes that rewrote history
-- Atlas recommends it (run `atlas status --json` to check)
+- The index is missing (verify from the Knowledge Base page, or check that `.tempest/atlas/atlas.db` exists — the `check_atlas_db` command does this)
 - You see "database is locked" errors (indicates corruption)
 
 You don't need to re-index for:
@@ -446,7 +438,7 @@ ATLAS_MCP_TOOLS=explore,node,search,callers,semantic_search
 
 **Indexing speed:**
 
-- Typical: 100-1000 files/second
+- Benchmarked end-to-end at 5,590 files/second (microsoft/vscode: 12,693 files, ~2.3 s wall — see BENCHMARKS.md)
 - Parallelized across worker threads
 - Bottleneck: tree-sitter parsing, not I/O or database writes
 
@@ -465,7 +457,7 @@ ATLAS_MCP_TOOLS=explore,node,search,callers,semantic_search
 
 **Disk space:**
 
-- Index database: 50 MB - 2 GB depending on project size
+- Index database: tens of MB to a few hundred MB+ depending on project size
 - WAL files: 0-500 MB (temporary during concurrent writes, cleaned after sync)
 
 ## Troubleshooting
@@ -473,8 +465,8 @@ ATLAS_MCP_TOOLS=explore,node,search,callers,semantic_search
 **"Database is locked" errors:**
 
 - Check if another process is indexing (look for `atlas` processes)
-- Ensure journal mode is WAL: `sqlite3 .atlas/atlas.db "PRAGMA journal_mode;"`
-- If corrupted, remove `.atlas/` and re-index
+- Ensure journal mode is WAL: `sqlite3 .tempest/atlas/atlas.db "PRAGMA journal_mode;"`
+- If corrupted, remove `.tempest/atlas/` and re-index
 
 **Indexing hangs or takes too long:**
 
@@ -485,19 +477,19 @@ ATLAS_MCP_TOOLS=explore,node,search,callers,semantic_search
 
 **Index is stale:**
 
-- Run `atlas index --path <project>` to rebuild with latest extraction engine
+- Remove the project's `.tempest/atlas/` directory (the `remove_atlas_index` Tauri command does this) and let Tempest re-run the initial index to rebuild with the latest extraction engine
 
 **Certain symbols aren't indexed:**
 
-- Check file language detection (`atlas status --json` shows language distribution)
+- Check the file's extension is mapped to a language (add custom mappings in `atlas.json`)
 - Verify file is not in excluded patterns
 - Ensure file is under project root
 
 **MCP daemon won't start:**
 
 - Set `ATLAS_NO_DAEMON=1` to run in direct mode
-- Check `.atlas/daemon.log` for errors
-- Ensure no stale daemon lock at `.atlas/daemon.lock`
+- Check `.tempest/atlas/daemon.log` for errors
+- Ensure no stale daemon lock at `.tempest/atlas/daemon.lock`
 
 ## The Knowledge Base tab
 

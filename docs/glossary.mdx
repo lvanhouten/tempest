@@ -1,0 +1,49 @@
+---
+title: "Glossary"
+description: "Every term Tempest uses, defined once."
+icon: "book"
+---
+
+# Glossary
+
+Tempest borrows plain words — workspace, session, channel — for very specific machinery. This page defines each term once, alphabetically, and links to the page with the full story.
+
+<Callout type="info">
+New to Tempest? The [Quickstart](/quickstart) gets a first session running, and [Architecture](/architecture) explains how the pieces below fit together.
+</Callout>
+
+- **Agent / agent session** — A CLI coding agent such as Claude Code or Codex CLI, run by Tempest in a PTY. Each agent session belongs to a workspace. See [Agents](/agents/overview).
+- **Agent manifest** — The registry of supported agents at `config/agents.json`, extended in place by a minisign-signed remote patch channel. See [Agent manifest](/agents/manifest).
+- **Atlas** — Tempest's semantic code graph and MCP server, shipped as the `@usetempest/atlas` npm package. Agents query the graph instead of scanning files from scratch. See [Token Intelligence](/token-intelligence/overview).
+- **Attribution** — The co-author git trailer Tempest adds to commits on your behalf. Configure it in **Settings → Attribution**.
+- **Automations** — Scheduled, repeatable agent runs that execute headlessly, without a visible session. See [Automations](/automations/overview).
+- **Base image** — In dbiso, a committed PostgreSQL container that database branches are created from, built once from your project's real database. See [Database branches](/database-branches/overview).
+- **Branch prefix** — A string set in **Settings → Git** that is prepended to the branch name of every new worktree.
+- **BYOK** — "Bring your own key": provider API keys you supply yourself, stored in the OS keyring under the service name `tempest-byok`. See [API keys](/settings/api-keys).
+- **Channel** — A typed Tauri streaming primitive. Tempest streams PTY output to the frontend over a per-session channel.
+- **Chat node** — A conversation node on the Threads canvas, powered by BYOK providers, CLI bridges, or the experimental Warp backend. See [Chat](/chat/overview) and [Threads](/threads/overview).
+- **Conversation ID** — A persistent agent UUID used to resume a conversation in a later session. Distinct from the session ID, which is ephemeral.
+- **DB Clones panel** — The right-sidebar panel listing a project's active database branches. See [Database branches](/database-branches/overview).
+- **Hephaestus** — Tempest's process isolation layer (`crates/hephaestus`): Job Objects on Windows, Seatbelt on macOS, bubblewrap on Linux. See [Security](/security/overview).
+- **Hook / lifecycle hooks** — A precise agent-status mechanism: agents report lifecycle events to a loopback HTTP receiver instead of Tempest inferring status from terminal output. See [Hooks](/agents/hooks).
+- **invoke** — Tauri's request/response IPC call from frontend to backend. Every backend command is invoked this way. See [Tauri commands](/internals/tauri-commands).
+- **Junction** — A Windows directory reparse point. Tempest uses junctions to share `node_modules` and `.venv` into worktrees instead of copying them.
+- **Knowledge Base** — The in-app, visual view of the Atlas graph. See [Knowledge Base](/knowledge-base/overview).
+- **Lifecycle job** — An always-on, kill-on-close Job Object attached to every session, even unsandboxed ones, so child processes never outlive Tempest.
+- **MCP** — The Model Context Protocol — the standard Tempest uses to expose Atlas tools to agent CLIs.
+- **Message Queue** — The per-session queue of prompts, drained automatically when work-done detection fires. See [Agents](/agents/overview).
+- **Models manifest** — The chat model registry at `config/models.json`, updated through an unsigned remote patch channel. See [Models](/chat/models).
+- **PTY** — Pseudo-terminal — the terminal Tempest allocates with `portable-pty` for every session.
+- **Provider presets** — Ready-made provider recipes for MiniMax and Z.ai GLM shipped in `config/providers.json`. See [Supported agents](/agents/supported).
+- **Ring buffer** — The sessionManager scrollback store: 2 MB while a session is attached, 128 KB once detached. Agent sessions restore their recent output from it after a restart.
+- **Root session** — A session running in the project root instead of a worktree.
+- **Runtime state** — The preferences blob persisted in SQLite under the `app_state` key `"runtime"`: settings, keybindings, theme, and more. See [App state internals](/internals/state).
+- **SandboxSpec** — The per-session isolation spec: a mode (`off`, `monitor`, `enforce`, or `lifecycle`) plus allowed hosts, paths, and resources. See [Security](/security/overview).
+- **Session ID** — The ephemeral identifier of a running PTY session. Contrast with conversation ID.
+- **Splits / pane tree** — The binary split layout that arranges sessions and panes inside a workspace. See [Panes](/components/panes).
+- **Threads canvas** — The spatial, node-based workspace where chat, text, agent, and terminal nodes live side by side. See [Threads](/threads/overview).
+- **Token Intelligence** — The umbrella for Atlas, semantic search, and context compression: a local code-knowledge graph shared across every parallel agent session. See [Token Intelligence](/token-intelligence/overview).
+- **Warm pool** — Three pre-created worktree slots with a 5-minute TTL, staged so a new workspace opens near-instantly. See [Worktrees](/git/worktrees).
+- **Worktree** — A git feature that checks a branch out into a separate directory while sharing the project's `.git` directory. Tempest places them under `.tempest/<name>`. See [Worktrees](/git/worktrees).
+- **Workspace** — Tempest's UI term for one worktree together with its session. See [Workspaces](/workspaces/overview).
+- **Zen window** — A secondary frameless window. The infrastructure is present; the UI entry point is disabled ("coming soon").

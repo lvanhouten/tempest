@@ -1,6 +1,6 @@
 ---
 title: "Introduction"
-description: "Run multiple AI agents in parallel with zero merge conflicts and up to 64% fewer tokens."
+description: "Run multiple AI agents in parallel with zero merge conflicts — a median 76% fewer tokens, 95% fewer file reads, and 50% less wall time."
 icon: "house"
 ---
 
@@ -21,15 +21,17 @@ Every agent runs with its own isolated environment, shared code context, and bui
 
 ### Parallel agents, no collisions
 
-Run Claude Code, Aider, OpenCode, Copilot CLI, Cline, Goose, and other tools simultaneously. Each agent works on its own branch within an isolated git worktree. One agent's changes never affect another's work, and a rogue run has zero blast radius on your main branch.
+Run Claude Code, Codex CLI, Gemini CLI, Opencode, Copilot CLI, Cline, Goose, and other tools simultaneously. Each agent works on its own branch within an isolated git worktree. One agent's changes never affect another's work, and a rogue run has zero blast radius on your main branch.
 
-### Up to 64% fewer tokens
+### Fewer tokens, faster agents
 
 Token Intelligence is a local code-knowledge graph that lives on your machine and is shared across every parallel agent session. When an agent needs to understand your codebase, it queries the graph instead of scanning files from scratch. The work is done once. Every session benefits.
 
-- Up to 64% less context token consumption
-- Up to 58% fewer tool calls
-- Faster turns, lower costs, agent effectiveness maintained throughout longer sessions
+Benchmarked across 7 real-world projects with paired runs ([BENCHMARKS.md](https://github.com/tempestai-dev/tempest/blob/main/BENCHMARKS.md)), Tempest delivers:
+
+- A median 76% fewer tokens (up to 86% per repo), 95% fewer file reads, and 50% less wall time
+- 63–92% fewer tool calls
+- Agent effectiveness maintained throughout longer sessions
 
 ### Built-in workflows
 
@@ -52,7 +54,7 @@ Review your changes, stage files, write commits, and open pull requests without 
 
 ## Supported Agents
 
-Tempest works with any CLI-based AI coding agent. Built-in support for:
+Tempest works with any CLI-based AI coding agent. 16 agents ship built in:
 
 - Claude Code
 - Codex CLI
@@ -63,17 +65,23 @@ Tempest works with any CLI-based AI coding agent. Built-in support for:
 - Cursor Agent
 - Antigravity
 - Goose
-- Amp, Hermes, Pi, fx, Grok
+- Amp, Hermes, Pi, fx, Grok, Qwen Code, Droid
 
 The agent list ships in [`config/agents.json`](https://github.com/tempestai-dev/tempest/blob/main/config/agents.json) and can be extended or updated in place — see [Supported Agents](/agents/supported).
 
+## What's Shipped
+
+Beyond parallel agent sessions and the Git workflows above:
+
+- **Threads canvas** — a spatial, node-based workspace where chat, text, agent, and terminal nodes live side by side.
+- **Tasks** — a unified inbox for GitHub and Linear tickets, with one-click agent launch into a fresh worktree.
+- **Automations** — scheduled, repeatable agent runs.
+- **Database Branches** — parallel agents doing real backend work get real databases: per-project Docker-based branched PostgreSQL containers to migrate, modify, or break without touching production or other sessions. Accessible from **Project Settings → Database** and visible in the right sidebar's DB Clones panel.
+- **Mobile companion (beta)** — check on agents, approve or redirect them mid-run, and review diffs from your phone.
+
 ## What's Coming
 
-**Database Branches** (shipping now)
-
-Parallel agents doing real backend work need real databases. Tempest now ships per-project Docker-based database isolation: each project gets its own branched container to migrate, modify, or break without touching production or other sessions. Accessible from **Project Settings → Database** and visible in the right sidebar's DB Clones panel.
-
-Planned features include macOS support, multi-agent coordination, and enterprise controls for audit logs, SSO, and team workspaces.
+Planned work includes Threads polish, more agent bridges, mobile apps (iOS/Android companion) with remote agents, continued macOS and Linux packaging progress, multi-agent coordination, and enterprise controls (audit logs, SSO, team workspaces).
 
 ## Getting Started
 
@@ -84,7 +92,7 @@ Choose how you want to run Tempest:
     Download installers for Windows, macOS, and Linux.
   </Card>
   <Card title="Build from Source" icon="code" href="/installation">
-    Clone the repo and build locally. Requires Node.js 18+ and Rust 1.77+.
+    Clone the repo and build locally. Requires Node.js 20+ and Rust.
   </Card>
 </CardGroup>
 

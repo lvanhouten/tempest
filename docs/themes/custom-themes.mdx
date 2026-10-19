@@ -306,7 +306,7 @@ To include a theme in the Tempest application directly:
    npm run build
    ```
 
-4. Your theme will automatically appear in the theme switcher, and the app will remember the user's selection via localStorage
+4. Your theme will automatically appear in the theme switcher. Built-in themes need no manual registration — Tempest discovers them via `import.meta.glob` of `src/themes/**/theme.json`, so placing the directory and rebuilding is enough. The app persists the user's selection in `RuntimeState.theme` (the `runtime` blob in Tempest's SQLite app state)
 
 ## Theme Distribution and Sharing
 
@@ -316,7 +316,7 @@ Share your theme as a standalone JSON file. Users can:
 
 1. Copy the JSON into a text file or editor
 2. Load it via the theme loading mechanism in Tempest
-3. The app persists their choice in localStorage
+3. Tempest persists their choice in `RuntimeState.theme` (the `runtime` blob in Tempest's SQLite app state)
 
 Example distribution workflow:
 
@@ -603,7 +603,7 @@ Use browns, oranges, and warm accent colors:
 
 ### Theme persists between theme switches
 
-This is expected behavior. Tempest stores the selected theme in localStorage. To reset, use your browser's developer tools to clear the `tempest-theme` key from localStorage.
+This is expected behavior. Tempest stores the selected theme in `RuntimeState.theme` (the `runtime` blob in Tempest's SQLite app state). To reset, re-select a built-in theme in Settings → Appearance.
 
 ## Sharing Your Theme
 
@@ -648,7 +648,7 @@ Loads a theme from a JSON string. The function:
 - Parses the JSON
 - Validates that `name` and `colors` fields exist
 - Applies all color tokens as CSS variables
-- Persists the theme selection to localStorage
+- Persists the theme selection to `RuntimeState.theme` (the `runtime` blob in Tempest's SQLite app state)
 - Sets the `data-theme` attribute on the document root
 
 Throws no exceptions; errors are logged to console.

@@ -14,94 +14,111 @@ Tempest is organized into frontend (React/TypeScript) and backend (Rust/Tauri) c
 
 ```
 tempest/
-  src/                          # React/TypeScript frontend
+  src/                          # React/TypeScript frontend (~250 TS/TSX files)
     components/                 # React UI components
-      RightSidebar.tsx         # File browser and git changes
-      SettingsPanel.tsx        # Settings dialog with multiple sections
-      NewSessionMenu.tsx       # Agent and terminal session picker
+      WorkspaceView.tsx        # Main workspace layout (sidebar, tabs, panes, modals)
+      WorkspaceView/           # Shell sub-components (TitleBar, TopBar, LeftSidebar, ContextMenu, ...)
+      RightSidebar.tsx         # File tree, git changes, DB Clones / Run / Terminal tabs
+      AgentTabs.tsx            # Top tab bar for agent and terminal sessions
+      SettingsPanel.tsx        # Settings dialog (13 sections)
+      ProjectSettingsPanel.tsx # Per-project security, agent, and database settings
+      NewSessionMenu.tsx       # Agent and terminal session picker (manifest-driven)
       BroadcastDialog.tsx      # Message broadcast to multiple agents
       PrDialog.tsx             # GitHub pull request creation
-      ProjectSwitcherModal.tsx # Project switcher
+      ProjectSwitcherModal.tsx # Project switcher (with git-clone mode)
       QueuePanel.tsx           # Message queue for pending prompts
-      TopBar.tsx               # Title bar and workspace controls
-      WorkspaceView.tsx        # Main workspace layout
       TerminalPane.tsx         # Embedded xterm.js terminal
       CodeMirrorPane.tsx       # Code editor with syntax highlighting
       DiffPane.tsx             # Unified diff viewer
       PreviewPane.tsx          # Live preview pane
-      OverviewPage.tsx         # Workspace overview/welcome
-      NexusPage.tsx            # Hub for project management
+      ThreadsView.tsx          # Threads canvas (chat/text/agent/terminal/file nodes)
+      threads/                 # Canvas node components and layout
+      OverviewPage.tsx         # All-workspaces dashboard
+      TasksPage.tsx            # GitHub + Linear task inbox
+      KnowledgeBasePage.tsx    # Visual Atlas graph
+      Automations/             # Scheduled agent runs
+      onboarding/              # First-run flow
       NewProjectModal.tsx      # Create or open a project
     
     themes/                     # Theme system
       types.ts                 # Theme interface definitions
       applyTheme.ts            # CSS variable injection
       ThemeContext.tsx         # React context for theme state
-      origin-dark/             # Built-in dark theme
+      tempest-dark/            # Built-in dark theme
         theme.json             # Color definitions
-      origin-light/            # Built-in light theme
+      tempest-light/           # Built-in light theme
         theme.json             # Color definitions
     
-    store/                      # State management (Zustand or similar)
+    store/                      # State management (24 custom store modules)
       keybindings.ts           # Keyboard shortcut state
       appSettings.ts           # User preferences
       sessions.ts              # Session metadata
-      sessionManager.ts        # Session lifecycle management
+      sessionManager.ts        # Session lifecycle and work-done detection
       messageQueue.ts          # Pending prompts per session
       prompts.ts               # Saved prompt library
       attribution.ts           # Co-author attribution flag
-      recents.ts               # Recent projects cache
-      workState.ts             # Workspace state
+      recents.ts               # Recent projects
+      workState.ts             # Idle/working/done badges
       openProjects.ts          # Currently open projects
+      threads.ts               # Threads canvas nodes and edges
+      automations.ts           # Automation CRUD and dispatch
+      ...                      # (24 modules total, all useSyncExternalStore)
     
-    lib/                        # Utilities
-      worktree.ts              # Git worktree operations
+    lib/                        # Pure logic + Tauri invoke wrappers
+      agentRegistry.ts         # Bundled + remote + custom agent configs
+      agentManifest.ts         # Manifest sanitization and capture specs
+      tempestConfig.ts         # tempest.yml loader
+      runtimeState.ts          # Runtime state shape and hydration
+      db.ts                    # SQLite-backed Tauri command wrappers
+      paneLayout.ts            # Binary split-tree pane layout
       webglPool.ts             # WebGL context pooling for xterm
-      runtimeState.ts          # Runtime state helpers
+      chat.ts                  # BYOK chat streaming (Vercel AI SDK)
+      worktree.ts              # Git worktree wrappers
+      ...                      # pairing/, mobileBridge/, agentHooks/, quota/, secrets/
     
-    assets/                     # Static assets
-      agent-icons/             # SVG icons for each agent
-        claude-color.svg
-        geminicli-color.svg
-        githubcopilot.svg
-        opencode.svg
-        cline.svg
-        cursor.svg
-        goose.svg
-      Mark.tsx                 # Tempest logo component
-    
-    App.tsx                    # Root React component
-    main.tsx                   # React DOM render entry point
-    vite-env.d.ts              # Vite environment types
+    assets/                     # Static assets (agent icons, logo, onboarding art)
+    App.tsx                     # Root React component
+    main.tsx                    # Entry: hydrates state, renders the app
+    vite-env.d.ts               # Vite environment types
 
-  src-tauri/                    # Rust backend
+  src-tauri/                    # Rust backend (Cargo workspace)
     src/
-      lib.rs                   # Tauri command definitions
+      lib.rs                   # Core Tauri commands (PTY, git, worktrees, Atlas, SQLite)
+      tasks.rs                 # GitHub + Linear task commands
+      automations.rs           # Automation scheduler and CRUD
+      pairing_relay.rs         # Mobile pairing WS router + cloudflared tunnel
+      claude_bridge.rs         # Chat bridge sidecar spawn
+      agent_hooks.rs           # Loopback HTTP receiver for agent lifecycle hooks
+      quota/                   # Per-provider usage readers
+      secrets.rs               # OS keyring (tempest-byok)
       main.rs                  # App entry point
-    
+    crates/
+      hephaestus/              # Process isolation SDK (Job Objects / Seatbelt / bubblewrap)
+      dbiso/                   # Docker database branching (PostgreSQL)
     resources/
-      atlas/                   # Token Intelligence MCP server (bundled)
-    
+      atlas/                   # Token Intelligence runtime (staged from @usetempest/atlas)
+      claude-bridge/           # Chat bridge sidecar (Node)
+    binaries/
+      cloudflared              # Tunnel sidecar for mobile pairing
     tauri.conf.json            # Tauri configuration
-    Cargo.toml                 # Rust dependencies
+    Cargo.toml                 # Workspace and dependency declarations
 
-  packages/
-    atlas/                     # Token Intelligence workspace (npm package)
-      src/                     # Atlas indexer source
-      dist/                    # Built atlas MCP server
-  
-  scripts/
-    bundle-atlas.mjs           # Build script to bundle atlas into Tauri
-    collect-artifacts.mjs      # Collect build artifacts
+  config/                       # Bundled config: agents.json (+ minisig), models.json, providers.json, agent-icons/
+  packages/                     # Shared libraries: core (wire types), crypto (NaCl E2EE), transport (RPC + WS)
+  apps/                         # relay (Cloudflare Worker alternative router), mobile (Expo companion)
+  web/                          # tempestai.dev marketing site (Next.js)
+  docs/                         # This documentation site (Mintlify)
+  scripts/                      # install-atlas, install-claude-bridge, install-cloudflared, collect-artifacts, ...
+  tests/                        # run.mjs — discovers and runs src/**/*.check.ts self-checks
 
-  package.json                 # NPM dependencies and scripts
+  package.json                 # NPM workspaces and scripts
   tsconfig.json                # TypeScript configuration
   vite.config.ts               # Vite configuration
 ```
 
 ## Running the Dev Build
 
-Prerequisites: Node.js 18+, Rust 1.77+, WebView2 Runtime (Windows only)
+Prerequisites: Node.js 20+, Rust (latest stable via rustup), WebView2 Runtime (Windows only)
 
 ```bash
 # Clone and install
@@ -113,12 +130,12 @@ npm install
 npm run dev
 ```
 
-The dev command:
-1. Runs `npm run build:atlas` to build the Token Intelligence server
-2. Launches Tauri in dev mode, which starts:
-   - Vite dev server on http://localhost:5173
-   - Tauri webview pointing to the dev server
-   - File watcher that hot-reloads on changes
+`npm install` runs the postinstall scripts, which stage the bundled sidecars into `src-tauri/resources/` (the Atlas runtime from the `@usetempest/atlas` package, the chat bridge Node dependencies) and fetch the `cloudflared` tunnel binary.
+
+The dev command (`tauri dev`):
+1. Starts the Vite dev server on http://localhost:1420
+2. Launches the Tauri webview pointing at the dev server
+3. Hot-reloads React/TypeScript changes; recompiles Rust when `src-tauri/` files change
 
 The app opens in a frameless window with custom styling via Tauri's window configuration.
 
@@ -137,52 +154,18 @@ npm run build:frontend  # Compile TypeScript and bundle with Vite
 npm run build           # Build Rust binary and create installers
 ```
 
-The build output goes to `dist-installers/` with platform-specific installers (Windows .msi, macOS .app.tar.gz, Linux .AppImage).
+`npm run build` runs `tauri build` and then `scripts/collect-artifacts.mjs`. On a Windows machine it produces an NSIS installer, an MSI, and a portable `.exe`, copying the NSIS installer and the portable executable to `dist-installers/` alongside updater artifacts. The released macOS and Linux artifacts (`.dmg`/`.app.tar.gz`, `.AppImage`/`.deb`) are built by CI.
 
-## Adding a New Agent to NewSessionMenu
+## Adding a New Agent
 
-Agents are defined in `src/components/NewSessionMenu.tsx` in the `AGENT_CONFIGS` array.
+Agents are **manifest-driven**. The bundled list ships as `config/agents.json` (16 agents), is merged with a minisign-verified remote manifest fetched from this repository, and is further merged with user-added agents from **Settings → Agents**. `AGENT_CONFIGS` is derived from that manifest via `src/lib/agentRegistry.ts` — there is no hardcoded agent array to edit.
 
-### Step 1: Prepare the agent icon
+The full procedure — manifest entry shape, flag templates, placeholders, icon rules, and the validation checks — is documented in [Supported Agents](/agents/supported). The short version:
 
-Add a new SVG icon to `src/assets/agent-icons/`:
-
-```
-agent-icons/
-  my-agent-color.svg    # SVG icon for the agent
-```
-
-If the icon is monochrome, it will be inverted in dark mode automatically.
-
-### Step 2: Add the agent config
-
-In `NewSessionMenu.tsx`, add a new entry to `AGENT_CONFIGS`:
-
-```typescript
-{
-  name: "My Agent",
-  hint: "my-agent",
-  iconSrc: myAgentSrc,
-  mono: false,  // true if monochrome
-  sessionIdArgs: ["--session-id", "{UUID}"],  // or null if no session support
-  resumeArgs: ["--resume", "{UUID}"],         // or null if no resume support
-  // Optional: if agent prints session ID to stdout
-  capturePattern: /session[\s=]+([a-f0-9-]+)/i,
-  captureResumeArgs: ["--session", "{UUID}"],
-}
-```
-
-### Step 3: Import the icon
-
-At the top of `NewSessionMenu.tsx`, add an import:
-
-```typescript
-import myAgentSrc from "../assets/agent-icons/my-agent-color.svg";
-```
-
-### Step 4: Test
-
-Restart the dev server. The new agent should appear in the "Agent Session" submenu.
+1. Add an entry to `config/agents.json` with the agent's `command`, flag templates (`flags.session`, `flags.resume`, `flags.model`, `flags.autoApprove`, `flags.print`), and optionally a `capture` spec for agents that print their own session ID.
+2. Commit the icon to `config/agent-icons/` (bundled built-ins also live in `src/assets/agent-icons/`).
+3. Verify each flag against the CLI's own `--help`, then run `npm test` — `src/lib/agentsManifestFile.check.ts` validates the shipped manifest (unique ids, resolvable icons, known placeholders).
+4. New agent entries reach existing installs through the signed remote manifest once `config/agents.json.minisig` is regenerated; until then they ship with the next release's bundled floor.
 
 ## Adding a New Theme
 
@@ -262,21 +245,11 @@ In `src/themes/my-theme/theme.json`:
 }
 ```
 
-All color tokens are required. See `src/themes/origin-dark/theme.json` for the complete reference.
+All color tokens are required. See `src/themes/tempest-dark/theme.json` for the complete reference.
 
-### Step 2: Register the theme
+### Step 2: Rebuild
 
-In `src/themes/ThemeContext.tsx`, import and add the new theme:
-
-```typescript
-import myTheme from "./my-theme/theme.json";
-
-// In the theme list:
-export const THEMES = [
-  myTheme,
-  // other themes...
-];
-```
+Themes are auto-discovered: `ThemeContext` globs `src/themes/**/theme.json` at build time via `import.meta.glob`, so placing your directory in `src/themes/` and rebuilding is all the registration needed — there is no THEMES array to edit.
 
 ### Step 3: Test
 
@@ -444,29 +417,30 @@ async function loadProject(path: string) {
 
 ### State Management
 
-Use Zustand stores for global state. Example from `src/store/appSettings.ts`:
+Tempest does not use Redux, Zustand, or Jotai. State lives in module-singleton stores under `src/store/` built on React's `useSyncExternalStore` — plain objects with getter/setter functions, plus `use*` hooks that subscribe with fine-grained selectors. The general shape:
 
 ```typescript
-import { create } from "zustand";
+let value = 0;
+const listeners = new Set<() => void>();
 
-interface AppSettings {
-  sidebarFontSize: number;
-  terminalFontSize: number;
-  // ... more settings
+export function setValue(next: number) {
+  value = next;
+  listeners.forEach((l) => l());
 }
 
-export const useSettings = create<AppSettings>((set) => ({
-  sidebarFontSize: 12,
-  terminalFontSize: 14,
-}));
+export function getValue() {
+  return value;
+}
 
-export function updateSetting<K extends keyof AppSettings>(
-  key: K,
-  value: AppSettings[K]
-) {
-  useSettings.setState({ [key]: value });
+export function useValue(): number {
+  return useSyncExternalStore(
+    (onChange) => { listeners.add(onChange); return () => listeners.delete(onChange); },
+    () => value
+  );
 }
 ```
+
+Settings that must survive restarts are written through the runtime state layer (persisted to the SQLite `app_state` table) rather than held only in a store — see [State Management](/internals/state).
 
 ### TypeScript Types
 
@@ -486,14 +460,22 @@ export function MyComponent({ title, count, onAction }: MyComponentProps) {
 
 ## Testing
 
-Currently, the codebase does not have automated tests. Manual testing via the dev build is the standard approach.
+Tempest uses lightweight self-checks rather than a test framework: assertions live as `src/**/*.check.ts` files that import pure functions and assert with `node:assert` (Node strips TS types natively). `tests/run.mjs` discovers every check file and runs each in its own Node process.
 
-To test a feature:
+```bash
+npm test                # Run all 18 check files
+npm test agentManifest  # Run only checks whose path matches the filter
+node tests/run.mjs -v   # Verbose stdout
+```
+
+There is no Vitest at the repo root (only the published Atlas package uses Vitest in its own repository) and no Rust integration-test directory. Manual testing via the dev build is still standard for UI work:
 
 1. Run `npm run dev`
 2. Interact with the feature in the app
 3. Check the browser console (F12) for errors
 4. Verify the expected behavior
+
+If you add a pure function with edge cases, add a `.check.ts` beside it so `npm test` guards it.
 
 For debugging:
 
@@ -504,15 +486,10 @@ For debugging:
 ## Building for Release
 
 ```bash
-npm run build:atlas  # Build Token Intelligence first
-npm run build        # Build everything and create installers
+npm run build    # tauri build + collect installers
 ```
 
-Installers are saved to `dist-installers/`:
-
-- Windows: `.msi` file
-- macOS: `.app.tar.gz` (requires signing, see Tauri docs)
-- Linux: `.AppImage`
+On Windows this produces an NSIS installer, an MSI, and a portable `.exe`; `scripts/collect-artifacts.mjs` copies the NSIS setup executable and the portable executable to `dist-installers/` alongside updater artifacts. The released macOS and Linux artifacts are built by CI.
 
 ## Performance Considerations
 

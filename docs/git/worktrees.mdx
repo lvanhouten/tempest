@@ -1,6 +1,6 @@
 ---
 title: "Git Worktrees in Tempest"
-description: "How Tempest creates and manages isolated git worktrees for parallel development."
+description: "How Tempest creates and manages isolated git worktrees for parallel development, from warm-pool claims to junction cleanup."
 icon: "diagram-project"
 ---
 
@@ -22,79 +22,63 @@ Tempest uses worktrees for three reasons:
 
 ## Worktree Creation: The Complete Flow
 
-When you create a workspace in Tempest, a series of git and file system operations run. Here is the exact flow implemented in `create_terminal_worktree`:
+When you create a workspace, Tempest runs a series of git and file system operations. The flow below is implemented by `create_terminal_worktree_sync` in `src-tauri/src/lib.rs`. Its defining feature is a **warm pool**: Tempest keeps up to three pre-created worktree slots ready, so starting a session is near-instant instead of waiting on a full checkout.
 
-### Step 1: Ensure At Least One Commit Exists
+### Step 1: Claim a Warm Worktree (When Available)
+
+Tempest maintains a pool of pre-created worktree slots:
+
+- Up to **3 slots**, each with a **5-minute TTL**
+- Staging directories live at `.tempest/.warm-<uuid8>` on branches named `tempest-prep/<uuid8>`
+
+If a warm slot is available, claiming it is a rename plus branch reset — session start takes a fraction of a second. If the pool is empty (cold start or pool exhausted), Tempest creates the worktree directly, as described in the next steps.
+
+### Step 2: Ensure At Least One Commit Exists
 
 ```
 git rev-parse --verify HEAD
 ```
 
-If the repository has no commits, Tempest creates an initial commit:
+If the repository has no commits, Tempest creates an initial commit (staging all files and committing with a `Tempest` author identity). This is necessary because `git worktree add` requires a HEAD reference to branch from.
 
-```
-git add -A
-git commit -m "Initial commit"
-```
-
-This is necessary because git worktree add requires a HEAD reference to branch from. If the repo is completely empty, worktree creation fails.
-
-### Step 2: Prune Stale Worktree Metadata
+### Step 3: Prune Stale Worktree Metadata
 
 ```
 git worktree prune
 ```
 
-This removes dangling `.git/worktrees/<name>` references left behind by previous failed or incomplete worktree removals. Without this, a previous crash could block worktree creation.
+This removes dangling `.git/worktrees/<name>` references left behind by previous failed or incomplete worktree removals.
 
-### Step 3: Check for Pre-Existing Paths
-
-If a directory already exists at the target path (`.tempest/<name>`), Tempest checks whether it is registered as a git worktree:
+### Step 4: Register the Worktree (`--no-checkout`)
 
 ```
-git worktree list --porcelain
+git worktree add --no-checkout .tempest/<name> -b <name>
 ```
 
-If the path exists but is not registered, it is removed as an orphan. If it is registered, the operation fails with an error asking the user to choose a different name.
+This creates the branch, registers the worktree in `.git/worktrees/<name>/`, and creates the worktree directory **without checking out files yet**. The materialization (the actual file checkout) then finishes in the background, so the session can spawn immediately rather than blocking on a full checkout.
 
-### Step 4: Create the Worktree
-
-```
-git worktree add .tempest/<name> -b <name>
-```
-
-This single command:
-- Creates a new branch named `<name>`
-- Checks it out into `.tempest/<name>/`
-- Registers it in `.git/worktrees/<name>/`
-
-The branch is a child of the current HEAD, so all project history is available. The worktree directory is now a complete git repository linked to the main `.git` directory via `.git` file (not a directory).
+On a cold start this is what makes creation fast: git registers the worktree instantly, and the working tree fills in asynchronously.
 
 ### Step 5: Exclude the `.tempest-pid` Sidecar
 
-After creation, Tempest writes a file to the worktree's git metadata to exclude a process ID sidecar:
+Tempest writes to the worktree's git metadata to exclude a process ID sidecar:
 
 ```
 # .git/worktrees/<name>/info/exclude
 .tempest-pid
 ```
 
-The `info/exclude` file is git's local-only equivalent to `.gitignore`. Entries here never enter version control and are not shared. This prevents the `.tempest-pid` file (which tracks the PTY session) from showing up as an untracked file in `git status`.
+The `info/exclude` file is git's local-only equivalent to `.gitignore`. Entries here never enter version control. This prevents the `.tempest-pid` file (which tracks the session's shell PID) from showing up as an untracked file in `git status`.
 
 ### Step 6: Copy Gitignored-but-Needed Files
 
-Files listed in `.tempest` entries in the project root's `.gitignore` are copied into the worktree so the agent can access them without recommitting them:
+Environment files that exist in the project root are copied into the worktree so the agent can access them without committing them:
 
 ```
 FILES_TO_COPY = [".env", ".env.local", ".env.development", ".env.production"]
 ```
 
-For each file that exists:
-```
-cp <project-root>/<file> .tempest/<name>/<file>
-```
-
-These files are gitignored in the main project, so git won't carry them into a newly checked-out worktree. Copying them manually ensures the agent sees credentials, environment configuration, and build-specific settings without modifying git history.
+These files are gitignored in the main project, so git won't carry them into a newly checked-out worktree. Copying them manually ensures the agent sees credentials and environment configuration without modifying git history.
 
 ### Step 7: Link Large Dependency Directories
 
@@ -110,26 +94,22 @@ junction D:\project\.tempest\<name>\node_modules D:\project\node_modules
 ln -s /project/node_modules /project/.tempest/<name>/node_modules
 ```
 
-Links are instantaneous and share a single on-disk copy. If either directory is missing, the link creation fails silently and the agent can re-run install if needed. Copying would freeze the worker thread for 30–120 seconds; linking is instantaneous.
+Links are instantaneous and share a single on-disk copy. If linking fails (for example, a permission error on Windows), Tempest logs a warning and continues — the worktree is still usable, and the agent can run `npm install` or create a `.venv` itself.
 
 ### Step 8: Validate the Worktree Is Not Empty
 
-```
-ls -la .tempest/<name>
-```
-
-If the worktree contains only the `.git` directory and nothing else, Tempest returns an error:
+If the worktree contains only the `.git` file and nothing else, Tempest returns an error:
 
 ```
 "Workspace created but contains no files. Your project files may be untracked or gitignored.
 Run 'git add && git commit' in the project root first, or the agent will see an empty directory."
 ```
 
-This prevents the agent from opening in a completely empty workspace, which would be unusable. If this error appears, commit at least some project files to the main branch first.
+This prevents the agent from opening in a completely empty workspace. If this error appears, commit at least some project files to the main branch first.
 
 ## The `.tempest/` Directory Layout
 
-After a successful worktree creation, the directory structure looks like this:
+After worktree creation, the directory structure looks like this:
 
 ```
 project/
@@ -138,18 +118,20 @@ project/
       workspace-name/            # Metadata for this worktree
         info/
           exclude                # Excludes .tempest-pid (local only)
-        HEAD                      # Points to refs/heads/workspace-name
-        gitdir                    # Path to the worktree's .git stub
+        HEAD                     # Points to refs/heads/workspace-name
+        gitdir                   # Path to the worktree's .git stub
   .tempest/
+    .warm-<uuid8>/               # Warm-pool staging slots (transient)
     workspace-name/              # The actual worktree directory
-      .git                        # File (not dir): gitdir -> ../.git/worktrees/workspace-name
-      .tempest-pid               # PTY session PID (excluded from git)
-      .env                        # Copied from project root (if it existed)
+      .git                       # File (not dir): gitdir -> ../.git/worktrees/workspace-name
+      .tempest-pid               # Session shell PID (excluded from git)
+      .env                       # Copied from project root (if it existed)
       node_modules/              # Junction/symlink to project/node_modules
-      .venv/                      # Junction/symlink to project/.venv (if it existed)
+      .venv/                     # Junction/symlink to project/.venv (if it existed)
       src/
       package.json
       ... (all project files)
+    atlas/                       # Token Intelligence index (atlas.db)
 ```
 
 The `.git` file inside `.tempest/workspace-name/` is a text file containing a `gitdir` reference:
@@ -158,23 +140,21 @@ The `.git` file inside `.tempest/workspace-name/` is a text file containing a `g
 gitdir: ../.git/worktrees/workspace-name
 ```
 
-This tells git where this worktree's metadata lives, allowing git operations to work correctly from inside the worktree.
+This tells git where the worktree's metadata lives, allowing git operations to work correctly from inside the worktree.
 
 ## Branches and Worktrees: One-to-One Mapping
 
 Tempest creates one worktree per workspace, and each worktree has exactly one associated branch. The mapping is:
 
-- Worktree name = Branch name
-- Both are user-provided when creating the workspace
-- The branch is created at worktree creation time (via `git worktree add -b <name>`)
-- If you delete the worktree, the branch remains (you must delete it separately via git UI or the Diff pane)
+- Worktree name = Branch name (a `branchPrefix` set in **Settings → Git** is prepended to branch names)
+- The branch is created at worktree creation time
+- Deleting the worktree does not delete the branch (delete it separately via the Diff pane's branch menu)
 
 For example, creating a workspace named `auth-feature` creates:
+
 - A git branch `refs/heads/auth-feature`
 - A worktree at `.tempest/auth-feature/`
 - Both map to the same workspace session
-
-If you open the Diff pane, you can see the current branch and switch to other branches or delete branches. These operations affect the git repository state, not the worktree itself.
 
 ## Symlinks and Junctions: Platform-Specific Linking Strategy
 
@@ -190,7 +170,7 @@ junction::create(&src, &dest)
 
 A junction is a reparse point that appears as a directory shortcut. It is atomic and does not require administrator privileges (unlike NTFS symbolic links which do). The OS treats it as pointing to the target, so reads and writes work transparently.
 
-When removing a worktree (step 6 below), Tempest calls `std::fs::remove_dir(&link)` which strips the reparse point without following it into the real directory.
+When removing a worktree, Tempest calls `std::fs::remove_dir(&link)` which strips the reparse point without following it into the real directory.
 
 ### Unix/macOS: Symbolic Links
 
@@ -202,34 +182,22 @@ std::os::unix::fs::symlink(&src, &dest)
 
 These are files that contain a path reference. Following the symlink is the OS's job; removing it is just `rm symlink`, which deletes the link without touching the target.
 
-### Why Both Exist
-
-Windows junctions and Unix symlinks have different semantics:
-- **Junctions**: Transparent to most tools, no special permissions, atomic remove.
-- **Symlinks**: Transparent on modern systems, but older Windows tools may not support them.
-
-Tempest chooses the right tool for each platform to maximize compatibility and performance.
-
 ## Worktree Removal: Cleanup Order
 
 Removing a worktree is not just `rm -rf`. Multiple steps ensure directory locks are released and git metadata is cleaned up:
 
 ### Step 1: Remove Directory Links First
 
-Before any directory deletion:
+Before any directory deletion, junctions and symlinks are stripped:
 
 ```rust
 for dir_name in ["node_modules", ".venv"] {
-  if dir exists at .tempest/<name>/<dir_name> {
-    #[cfg(windows)]
-    std::fs::remove_dir(&link)  // Strips reparse point
-    #[cfg(unix)]
-    std::fs::remove_file(&link) // Removes symlink
-  }
+  // Windows: std::fs::remove_dir(&link)  — strips the reparse point
+  // Unix:    std::fs::remove_file(&link) — removes the symlink
 }
 ```
 
-This is critical on Windows: if you follow a junction into the real node_modules and then call `remove_dir_all`, the OS will traverse into the target and delete the real dependency directory, corrupting the project.
+This is critical on Windows: if you follow a junction into the real `node_modules` and then call `remove_dir_all`, the OS will traverse into the target and delete the real dependency directory, corrupting the project.
 
 ### Step 2: Remove the Worktree via Git
 
@@ -239,7 +207,7 @@ git worktree remove --force .tempest/<name>
 
 Git removes the worktree directory and deregisters it from `.git/worktrees/`.
 
-### Step 3: Retry with Retries (Windows Fallback)
+### Step 3: Retry with Direct Removal (Windows Fallback)
 
 If `git worktree remove` fails (common on Windows due to PTY process handle lag), Tempest retries direct removal up to 6 times with 500 ms gaps:
 
@@ -258,13 +226,13 @@ This rides out the PTY child process releasing its CWD handle asynchronously.
 
 ### Step 4: Last Resort: Shell Command (Windows Only)
 
-If Rust's `fs::remove_dir_all` fails after retries with OS error 32 (handle still held), fall back to the shell:
+If Rust's `fs::remove_dir_all` fails after retries with the directory still locked, Tempest falls back to the shell:
 
 ```
 cmd /c rmdir /s /q <worktree-path>
 ```
 
-The Windows shell's rmdir can succeed where Rust's API fails due to subtleties in inherited handle cleanup.
+The Windows shell's `rmdir` can succeed where Rust's API fails due to subtleties in inherited handle cleanup.
 
 ### Step 5: Prune Dangling Git Metadata
 
@@ -272,7 +240,7 @@ The Windows shell's rmdir can succeed where Rust's API fails due to subtleties i
 git worktree prune
 ```
 
-Remove any `.git/worktrees/<name>` references left behind if the above steps partially succeeded.
+Removes any `.git/worktrees/<name>` references left behind if the above steps partially succeeded.
 
 ## Edge Cases and Error Handling
 
@@ -280,40 +248,26 @@ Remove any `.git/worktrees/<name>` references left behind if the above steps par
 
 When you open a workspace on branch A, make changes, then open a second workspace on branch B, the changes on branch A are preserved in the worktree. They do not affect branch B because each worktree has its own working tree.
 
-If you try to delete a worktree with uncommitted changes, Tempest uses `--force` to ignore them:
-
-```
-git worktree remove --force
-```
-
-The uncommitted changes are discarded. If you want to preserve them, you must commit or stash them first via the Diff pane or terminal.
+If you try to delete a worktree with uncommitted changes, Tempest uses `--force` to ignore them. The uncommitted changes are discarded. If you want to preserve them, commit or stash them first via the Diff pane or terminal.
 
 ### Detached HEAD State
 
 Worktrees are always on a branch created at creation time. If you manually check out a commit (detaching HEAD), git operations still work; you can commit to the detached HEAD, then switch back to the branch or create a new branch.
 
-Tempest does not prevent this, but the workspace name will refer to the original branch while HEAD is detached. Switching branches via the Diff pane branch menu will reattach to the named branch.
-
-### Missing Parent Commit
-
-If you delete the parent branch that the worktree branched from, the worktree remains valid. The branch still exists and points to the same commit; git can still track history.
-
-However, branch-switching and merging operations may behave unexpectedly. This is an advanced edge case and Tempest does not guard against it.
-
 ### Repository With No Commits Yet
 
-If the repository has never been committed to, Tempest creates an initial commit before creating the worktree. This happens silently during workspace creation and ensures git operations work.
+If the repository has never been committed to, Tempest creates an initial commit before creating the worktree. This happens during workspace creation and ensures git operations work.
 
 ## Git Hooks: Co-Author Attribution
 
-When a workspace is created, Tempest installs a git hook to automatically add a co-author line to commits. This identifies work done by Tempest and its agent.
+When attribution is enabled, Tempest installs a `prepare-commit-msg` git hook that automatically appends a co-author line to commits. This identifies work done through Tempest.
 
 ### Hook Installation
 
-The hook is written to the worktree's local hooks directory:
+The hook is written to the **main repository's** hooks directory:
 
 ```
-.git/worktrees/<name>/hooks/prepare-commit-msg
+.git/hooks/prepare-commit-msg
 ```
 
 The hook content (installed via `write_coauthor_hook`):
@@ -321,7 +275,7 @@ The hook content (installed via `write_coauthor_hook`):
 ```bash
 #!/bin/sh
 # Tempest-attribution-begin
-COAUTHOR="Co-authored-by: Tempest <tempest@local>"
+COAUTHOR="Co-authored-by: Tempest <tempestai.dev@gmail.com>"
 if ! grep -qF "$COAUTHOR" "$1"; then
   printf '\n\n%s\n' "$COAUTHOR" >> "$1"
 fi
@@ -330,25 +284,18 @@ fi
 
 This hook runs before every commit. It appends the co-author line if it is not already present, ensuring each commit is credited.
 
-### Hook Scope
-
-The hook is installed in the worktree's `.git/hooks/` directory, so it only affects commits in that worktree. The main project is not affected. Different worktrees can have different hooks.
+<Callout type="info">
+The hook is per-repository, not per-worktree. Because all of a project's worktrees share the same `.git` directory, the hook affects commits made in any worktree of that repository.
+</Callout>
 
 ### Disabling the Hook
 
-Users can disable the co-author line in the Diff pane via a checkbox. When unchecked, the co-author line is not added to the commit message.
+The co-author line is controlled by the **Attribution** setting (Settings → Attribution). When off, the hook block is removed from the commit flow.
 
 ### Hook Removal
 
-When a workspace is closed, the hook is removed via `remove_coauthor_hook`:
-
-```rust
-// Strip the Tempest block from .git/worktrees/<name>/hooks/prepare-commit-msg
-// If nothing else remains, delete the hook file entirely.
-```
-
-This is idempotent, so it can be called multiple times safely. If the hook file is missing or the Tempest block is not present, the operation succeeds silently.
+`remove_coauthor_hook` strips the Tempest block from `.git/hooks/prepare-commit-msg`. If nothing else remains, the hook file is deleted entirely. The operation is idempotent — if the hook file is missing or the Tempest block is not present, it succeeds silently.
 
 ## Summary
 
-Git worktrees in Tempest provide isolated, stash-free parallel development. Each workspace is a separate branch checked out into `.tempest/<name>/`, with node_modules and .venv linked for performance. Worktree creation validates repository state, copies environment files, and installs a co-author hook. Removal cleans up links, git metadata, and handles Windows process handle lag with retries and fallbacks. The whole system is transparent to the user; the Diff pane and RightSidebar provide a high-level view of branches, changes, and commits.
+Git worktrees in Tempest provide isolated, stash-free parallel development. Each workspace is a separate branch registered at `.tempest/<name>/` — often claimed instantly from a warm pool of pre-created slots — with `node_modules` and `.venv` linked for performance. Worktree creation validates repository state, copies environment files, and (when attribution is on) installs a repository-level co-author hook. Removal cleans up links, git metadata, and handles Windows process handle lag with retries and fallbacks. The whole system is transparent to the user; the Diff pane and right sidebar provide a high-level view of branches, changes, and commits.

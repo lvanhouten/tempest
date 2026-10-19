@@ -18,7 +18,7 @@ Keys are stored in your operating system's credential manager under the service 
 | macOS | Keychain |
 | Linux | Secret Service (GNOME Keyring, KWallet) via D-Bus |
 
-They are never written to `localStorage`, config files, or logs. Only the model selection and the currently-active provider live in `localStorage` — the secret itself sits in the keychain.
+They are never written to `localStorage`, config files, or logs. Only non-secret preferences — like the active chat provider and model — live in runtime state (SQLite). The secret itself sits in the keychain.
 
 Earlier releases stored keys in `localStorage`. On first read after upgrading, Tempest silently promotes any legacy key into the keychain and wipes the plaintext copy.
 
@@ -55,10 +55,12 @@ Keys are stored per provider, not per agent. If you use, for example, OpenCode w
 | Feature | Key needed |
 |---------|-----------|
 | [Chat pane](/chat/overview) with a hosted model | The provider hosting that model |
-| Codex / Gemini / Opencode bridges | The provider they call (usually OpenAI or Anthropic; see agent docs) |
+| Codex / Gemini / Opencode bridges | None — these CLI bridges use whatever the CLI itself is logged into; no BYOK key |
 | warpLLM opt-in agent | Provider chosen in its settings |
 | Local agents (Ollama, LM Studio) | None — a base URL is enough |
 | Tasks tab (Linear sync) | Linear |
-| Tasks tab (GitHub sync) | GitHub personal access token (managed separately in the Tasks tab) |
+| Tasks tab (GitHub sync) | None — Tempest shells out to your local `gh` CLI auth (see [Tasks](/tasks/overview)) |
+
+One `localStorage` exception exists, by design client-side: creating a pull request from the diff pane stores a GitHub token under the `tempest-github-token` key so the request can be made from the app directly.
 
 Agents that ship their own auth (Claude Code CLI, Gemini CLI, and similar) continue to use whatever the CLI is already logged into on your machine. Tempest doesn't touch those.

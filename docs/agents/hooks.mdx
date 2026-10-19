@@ -1,0 +1,86 @@
+---
+title: "Agent Lifecycle Hooks"
+description: "How Tempest gets precise working / waiting / done signals from supported agents via a loopback hook receiver."
+icon: "radio"
+---
+
+# Agent Lifecycle Hooks
+
+Several supported agents can tell Tempest exactly what they are doing. For those, Tempest installs a small managed hook into the agent's own configuration, and the agent POSTs one event per turn boundary, tool call, or permission prompt to a loopback receiver in Tempest's backend. The result is a precise `working` / `waiting` / `done` status instead of inferring state from terminal output — and agents that cannot do this keep working normally with the PTY-scraping heuristics described in [Agent System Overview](/agents/overview).
+
+## How a hook event travels
+
+1. **Spawning tags the session.** Tempest injects a `TEMPEST_SESSION` environment variable when it spawns the agent, so every event the agent's hooks emit can be routed back to the correct session.
+2. **The agent fires the hook.** All managed scripts share one body (`src/lib/agentHooks/script.ts`): source the endpoint file for the current port and token, bail silently if either is unset, then POST the stdin payload to `http://127.0.0.1:<port>/hook/<agent>` with `X-Tempest-Token` and `X-Tempest-Session` headers. When the agent's payload does not name the event, the script sends it out-of-band through an `X-Tempest-Event` fallback header (Antigravity and Copilot work this way). The curl call is short-timed — 0.5 s connect, 1.5 s max — so a status hook can never slow a turn, and Windows invokes the fully qualified `%SystemRoot%\System32\curl.exe` so a repo-local `curl.exe` cannot hijack it.
+3. **The Rust receiver authenticates and forwards.** `src-tauri/src/agent_hooks.rs` is a dumb, secure pipe: it binds an ephemeral loopback port, validates the per-run token (a constant-time compare; a request without it gets 403), requires the session header (an event without one is dropped with 400), caps the body at 1 MB, and emits the Tauri event `agent-hook` with the shape `{agent, session, event, body}`. Rust never interprets the payload — all per-agent parsing lives next to the agent registry.
+4. **An adapter maps it to a state.** The frontend store (`src/store/agentHooks.ts`) listens for `agent-hook`, selects the adapter for the agent id, JSON-parses the body (a malformed payload is ignored — the fallback heuristics keep speaking), folds the out-of-band event name into `hook_event_name`, and calls `sessionManager.applyHookState` with the parsed state.
+
+## The state model
+
+Hooks resolve to one of three states (`HookState` in `src/lib/agentHooks/types.ts`):
+
+| State | Meaning | What the UI does |
+|-------|---------|------------------|
+| `working` | The agent is processing | The session's work state is set to `working` and attention is cleared. |
+| `waiting` | Needs you — a permission prompt or a blocking question | Work state flips to `done` plus the attention flag, and the Dynamic Island shows a **Permission needed** notification detailing the tool that asked. Fires once per turn, so repeated permission repaints do not re-stamp the bell. |
+| `done` | The turn is complete | Work state flips to `done`, attention clears, and the Dynamic Island shows a **Task complete** notification. |
+
+`applyHookState` (in `src/store/sessionManager.ts`) is **authoritative** from the first hook event onward: the PTY heuristics — byte-quiet and ceiling timers, OSC done/working signals, title busy/idle classification — stand down so they cannot fight the hooks. It mirrors the `markDone`/`markAttention` side effects, meaning the `onDone` edge fires once per working-to-terminal transition and [Message Queue](/agents/overview#agent-aware-clear) delivery and diff refresh behave identically whether a turn ends via hook or via scraping.
+
+### "Waiting" coverage varies by agent
+
+An adapter reports `hookCoversWaiting` — whether its hook set includes a real permission signal. Claude, Codex, Copilot, Hermes, and Opencode all do, so hooks own the full state including "needs you" and the attention detectors (title markers, OSC RequestAttention, BEL) stand down entirely. Gemini, Cursor, and Antigravity have no permission-prompt hook, so their adapters set it to `false`: hooks still drive `working`/`done`, but the PTY attention heuristics stay live, because otherwise those agents would lose their only "needs you" signal.
+
+<Callout type="info">
+  Lifecycle hook adapters are bundled code — each one teaches Tempest that agent's native hook mechanism — so hook support ships with a release. Agents without a hook mechanism (Cline, Goose, Pi) deliberately have no adapter and fall back gracefully to PTY-scraped status; nothing breaks, their status is just less precise.
+</Callout>
+
+## Supported agents
+
+Eight adapters ship in `src/lib/agentHooks/adapters/`, registered in `src/lib/agentHooks/index.ts` — adding one requires dropping the adapter there and listing it, with no further wiring:
+
+| Agent | Tempest splices into | Covers waiting |
+|-------|----------------------|----------------|
+| Claude Code | `~/.claude/settings.json` hooks (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PermissionRequest`, `Notification`, `Stop`), each running the managed script through a shell with the event as JSON on stdin | Yes |
+| Gemini CLI | `~/.gemini/settings.json`, Claude-style nested hooks (`BeforeAgent`, `BeforeTool`, `AfterTool`, `AfterAgent`) | No |
+| Cursor Agent | `~/.cursor/hooks.json` — a flat command per definition, plus the top-level `version: 1` the schema requires | No |
+| Copilot CLI | `~/.copilot/hooks/tempest.json` — one managed command per event, injecting the event name through the environment | Yes |
+| Antigravity | `~/.gemini/config/hooks.json` (not the Gemini CLI settings file), under a dedicated `tempest-status` bundle key, with per-event wrapper commands on Windows | No |
+| Codex CLI | `~/.codex/hooks.json` plus trust blocks in `~/.codex/config.toml` | Yes |
+| Hermes | A managed Python plugin at `~/.hermes/plugins/tempest-status/`, enabled under `plugins.enabled` in `~/.hermes/config.yaml` | Yes |
+| Opencode | An ESM plugin dropped in `~/.config/opencode/plugin/`, which runs inside Opencode's own process and POSTs normalized lifecycle events | Yes |
+
+Some managed scripts print `{}` before posting, because their agent parses the hook's stdout as JSON (Gemini and Cursor do; Claude tolerates empty output). Antigravity requires a JSON object on stdout too — `{"decision":""}` for `Stop`, otherwise `{}` — or it stalls. The Antigravity adapter subscribes only observational events, deliberately skipping `PreToolUse`, whose hook gates tool permission and would let a status hook block the user.
+
+## Installation
+
+Tempest manages the whole install; you never edit an agent's config by hand. The agent-agnostic engine (`src/lib/agentHooks/installer.ts`) drives each adapter's plan through the Rust filesystem commands:
+
+1. **Scripts first.** Each managed script is written to `~/.tempest/hooks/` before any config references it — a config pointing at a not-yet-written script would make the agent exit with code 127 on every turn.
+2. **Then configs.** Each adapter config edit is applied by reading the file's raw text, transforming it (JSON merge for most agents, byte-editing for Codex's TOML), and writing it back. Every write goes through the `hooks_write_atomic` Tauri command — a temp-file-plus-rename write with an exec bit on unix, a same-content skip, and a rolling `.bak` of the previous copy. Locations come from the `hooks_paths` command. A config an adapter declines to edit (malformed JSON, or nothing to change) is left untouched.
+3. **Endpoint files.** The app writes `~/.tempest/hooks/endpoint.env` (sourced by POSIX shells) and `endpoint.cmd` (`call`ed by cmd.exe) publishing the current ephemeral port and per-run token, so a hook script re-sources the current values even after the app restarts under a still-live PTY:
+
+   ```
+   TEMPEST_HOOK_PORT=<port>
+   TEMPEST_HOOK_TOKEN=<token>
+   ```
+
+The token is 32 hex characters of OS entropy, regenerated each run and compared in constant time — a stray local process cannot spoof agent status without it.
+
+**Your own hooks are preserved.** Adapters merge managed entries into existing hook lists rather than replacing them, and on removal they strip only entries matching the managed script name. Uninstalling hooks strips the config entries and leaves the managed scripts on disk, where they are harmless once nothing references them.
+
+### Codex trust handling
+
+Codex (0.129+) silently skips a hook whose handler is not trusted: `config.toml` must contain a `[hooks.state."<key>"]` block carrying a `trusted_hash`, a SHA-256 over a canonical identity of the handler. `src/lib/agentHooks/codexTrust.ts` reproduces Codex's published hash algorithm (canonical JSON plus the command-hook hash), while the Codex adapter merges its managed hook last per event so user hooks keep their trust positions, then writes matching trust blocks byte-preserving the rest of the file. A drifted hash is not destructive — Codex just ignores the untrusted hook and Tempest falls back to PTY scraping — but a right one gives precise status.
+
+## The setting
+
+The toggle is **Settings → Security → Precise agent status (hooks)** (`preciseAgentStatus`, on by default). With it enabled, the hook receiver installs or refreshes all managed hooks at startup; toggling it off uninstalls them. Sessions that are already hook-authoritative stay so until they end; sessions started after an uninstall use the PTY heuristics. If an adapter fails to wire its config at install, Tempest logs it explicitly rather than leaving you with a silently half-wired agent whose session never turns hook-authoritative.
+
+## When hooks are off or unsupported
+
+Agents without hook support — and any session whose hooks are uninstalled or whose payloads are malformed — run status entirely from PTY scraping: the quiet and ceiling timers, terminal escape sequences (OSC progress bars and notification signals, shell-integration sequences, bracketed-paste and alternate-screen modes), and per-agent title classification. The full picture, including which agents have taught title conventions, is in [Agent System Overview](/agents/overview).
+
+## Not the `tempest.yml` hooks
+
+Tempest also has "hooks" in [`tempest.yml`](/tempest-yml): `setup:` entries, which run when worktrees are created, and `teardown:` entries, which run when worktrees are cleaned — shell commands run to completion, failing fast. Those are repo lifecycle commands delivered through the `run_hook` command, a different mechanism from the agent lifecycle hooks on this page, which observe a live agent session instead of running any commands.

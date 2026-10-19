@@ -1,0 +1,120 @@
+---
+title: "Settings Reference"
+description: "Every app-level setting, its section, and its default."
+icon: "sliders"
+---
+
+# Settings Reference
+
+Tempest has two settings surfaces. **Settings** (the app-level panel) holds preferences that apply everywhere — appearance, terminal, git behavior, agent defaults. **Project Settings** (per project) holds the security and data configuration that applies when agents run inside that project.
+
+## App-level sections
+
+The Settings panel has 13 sections, grouped as General plus a Help group. Section ids are as they appear in `src/components/SettingsPanel.tsx`.
+
+| Section id | Label | What it controls | Docs |
+|------------|-------|------------------|------|
+| `appearance` | Appearance | Theme picker, sidebar font size, and the default editor the toolbar Open-in button launches | [Themes](/themes/overview) |
+| `terminal` | Terminal | Terminal font size and family, cursor style, cursor blink, and scrollback | — |
+| `git` | Git | Branch prefix for new worktree branches, and the commit message used when pushing agent changes | — |
+| `intelligence` | Token Intelligence | Atlas code indexing (enable, auto-index new projects), semantic code search, and chat context compression | — |
+| `security` | Security | Auto-approve agent tool calls, agent session isolation, precise agent status hooks, desktop notifications, anonymous telemetry | [Security](/security/overview) |
+| `mobile` | Mobile (Beta) | Pairing a phone to drive Tempest remotely, via a QR code scanned from the Tempest mobile app | [Mobile](/mobile/overview) |
+| `agents` | Agents | Per-agent launch defaults (extra flags, environment, working subdirectory), provider presets, custom agents, and the `claude` CLI path override | [Agent manifest](/agents/manifest) |
+| `apikeys` | API Keys | Bring-your-own-key slots, stored in your OS credential manager | [API Keys](/settings/api-keys) |
+| `prompts` | Prompts | The saved Prompt Library, insertable into the message queue with one click | — |
+| `keyboard` | Keybindings | Remappable keyboard shortcuts — click a binding to remap it | — |
+| `attribution` | Attribution | Whether Tempest adds itself as a co-author on commits made inside your workspaces | — |
+| `experimental` | Experimental | Opt-in features, currently the experimental Warp chat backend | — |
+| `about` | About | App version, build info, and a developer-tools shortcut | — |
+
+## App settings
+
+Every field in `AppSettings` (`src/store/appSettings.ts`), with its type and default. Defaults live in `SETTINGS_DEFAULTS` in that file.
+
+<Properties>
+  <Property name="terminalFontSize" type="number" default="13">
+    Embedded terminal text size, in px. The stepper allows 10–20.
+  </Property>
+  <Property name="terminalFontFamily" type="string" default='"Geist Mono"'>
+    Embedded terminal typeface. One of: `Geist Mono`, `JetBrains Mono`, `Fira Code`, `Cascadia Code`, `Consolas`, `Menlo`, `monospace`.
+  </Property>
+  <Property name="terminalCursorStyle" type='"block" | "bar" | "underline"' default='"block"'>
+    Cursor shape shown in the terminal.
+  </Property>
+  <Property name="terminalCursorBlink" type="boolean" default="true">
+    Whether the terminal cursor blinks.
+  </Property>
+  <Property name="terminalScrollback" type="number" default="1000">
+    Lines kept in terminal history. Accepts 100–50,000, in steps of 100.
+  </Property>
+  <Property name="sidebarFontSize" type="number" default="14">
+    Sidebar text size, in px. The stepper allows 12–18.
+  </Property>
+  <Property name="branchPrefix" type="string" default='""'>
+    Prefix prepended to new worktree branch names.
+  </Property>
+  <Property name="commitMessageTemplate" type="string" default='"Agent work"'>
+    Commit message used when pushing agent changes.
+  </Property>
+  <Property name="atlasEnabled" type="boolean" default="false">
+    Master switch for Token Intelligence (Atlas). Off by default.
+  </Property>
+  <Property name="atlasAutoIndex" type="boolean" default="false">
+    Index every new project automatically instead of prompting.
+  </Property>
+  <Property name="atlasSemantic" type="boolean" default="false">
+    Semantic (vector) code search. Opt-in: requires a one-time ~25 MB embedding model download. When off, Atlas stays full-text only, with no download.
+  </Property>
+  <Property name="contextCompression" type="boolean" default="false">
+    Holds bulky lineage bodies and older chat turns out of the outgoing context, replaced by stubs that name their own retrieval call. Nothing is summarized away.
+  </Property>
+  <Property name="isolateAgents" type="boolean" default="true">
+    Wrap every new agent session in a Hephaestus sandbox. Applies to sessions started after the toggle changes.
+  </Property>
+  <Property name="autoApprove" type="boolean" default="true">
+    Pass each agent's skip-permissions flag at spawn so it never stops to ask for confirmation. Supported agents: Claude Code, Gemini CLI, Codex CLI, Antigravity.
+  </Property>
+  <Property name="preciseAgentStatus" type="boolean" default="true">
+    Install lifecycle hooks into supported agents' configs so working / waiting / done status is driven by real events. Turning it off removes the hooks and falls back to the PTY-scraping heuristic.
+  </Property>
+  <Property name="desktopNotifications" type="boolean" default="true">
+    OS notification when an agent finishes or asks for permission while the Tempest window is unfocused. Suppressed while Tempest has focus.
+  </Property>
+  <Property name="telemetryEnabled" type="boolean" default="false">
+    Anonymous usage telemetry (PostHog). Nothing is loaded or sent until you explicitly opt in.
+  </Property>
+  <Property name="experimentalWarp" type="boolean" default="false">
+    Enables the experimental Warp (warpllm) chat backend, which adds a Warp row to chat nodes' Agents picker.
+  </Property>
+  <Property name="claudeCliPath" type="string" default='""'>
+    Override for the `claude` CLI that the Claude Code chat bridge invokes. Empty falls back to a `where`/`which claude` lookup on PATH.
+  </Property>
+  <Property name="defaultIde" type="string" default='"cursor"'>
+    The IDE the toolbar Open-in button launches. One of the ids in `IdeOpenButton`'s IDES list: `cursor`, `vscode`, `zed`, `windsurf`, `jetbrains`, `sublime`, `devin`. The three-dot menu next to the button can launch any of the others without changing this default.
+  </Property>
+</Properties>
+
+<Callout type="info">
+  Where settings persist: app settings are one JSON blob in the SQLite `app_state` table under the key `runtime`, read and written through the `db_load_app_state` / `db_set_app_state` Tauri commands. See [State](/internals/state).
+</Callout>
+
+The Appearance section's theme picker covers the two built-in themes, `tempest-dark` and `tempest-light` — see [Themes](/themes/overview) for what each contains and how to add your own.
+
+## Project Settings
+
+Project Settings (`ProjectSettingsPanel`) are per project and configure what agents may do inside that project's sessions. There are seven sections in three groups:
+
+| Group | Section | What it controls |
+|-------|---------|------------------|
+| Security | `sandbox` | Sandbox isolation mode (`off`, `monitor`, or `enforce`) |
+| Security | `network` | Network policy (permissive or restrictive), with allow and block host lists |
+| Security | `filesystem` | Read-write and read-only path mounts for the sandbox |
+| Security | `permissions` | Whether sessions may skip permissions, and whether repo hooks may run |
+| Security | `resources` | Per-session OS quotas: memory, processes, disk writes, CPU weight |
+| Agent | `agent` | Which agents are permitted in this project |
+| Data | `database` | Database isolation (branching) for the project's sessions |
+
+<Callout type="info">
+  Project Settings live per project: each project's blob is stored as its own row in the same SQLite `app_state` table, keyed `project-settings:{projectId}`. When a repo contains a [tempest.yml](/tempest-yml), its security config is clamped over the stored settings — the file may only tighten, never loosen — and that clamp is not persisted back into the row. See [Security](/security/overview).
+</Callout>

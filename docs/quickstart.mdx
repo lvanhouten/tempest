@@ -9,11 +9,11 @@ Get Tempest up and running on your machine. The build process orchestrates Rust 
 ## Prerequisites
 
 <Steps>
-  <Step title="Node.js 18 or later">
-    Download from [nodejs.org](https://nodejs.org). Tempest uses Node for the React frontend build and npm scripts.
+  <Step title="Node.js 20 or later">
+    Download from [nodejs.org](https://nodejs.org). Tempest uses Node for the React frontend build and npm scripts. Atlas requires Node 20+.
   </Step>
-  <Step title="Rust 1.77 or later">
-    Install from [rustup.rs](https://rustup.rs). Tauri compiles the native backend with Rust.
+  <Step title="Rust (latest stable)">
+    Install the latest stable toolchain via [rustup](https://rustup.rs). Tauri compiles the native backend with Rust.
   </Step>
   <Step title="Windows: WebView2 Runtime">
     Windows only. Download from [Microsoft Edge WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/). This is the rendering engine for the Tauri window.
@@ -33,13 +33,8 @@ Get Tempest up and running on your machine. The build process orchestrates Rust 
     ```bash
     npm install
     ```
-  </Step>
-  <Step title="Build workspace assets">
-    ```bash
-    npm run setup
-    ```
 
-    This builds the Atlas workspace and bundles its resources. Required before development or production builds.
+    That is the whole setup: `npm install` runs postinstall scripts that automatically stage the Atlas bundle, the chat bridge sidecars, and the cloudflared sidecar. Nothing else to set up.
   </Step>
 </Steps>
 
@@ -51,13 +46,13 @@ Start the dev server with live reload:
 npm run dev
 ```
 
-This command:
+`npm run dev` runs `tauri dev`, which:
 
-1. Builds the Atlas workspace and starts the Vite dev server on `http://localhost:1420`
-2. Launches the Tauri app window with hot module replacement (HMR) on port 1421
-3. Reloads React components, TypeScript, and styles instantly in the window
+1. Starts the Vite dev server on `http://localhost:1420` and launches the Tauri app window
+2. Reloads React components, TypeScript, and styles instantly — HMR shares port 1420
+3. Recompiles and relaunches the Rust backend whenever `src-tauri/` changes
 
-The app runs against the frontend dev server, not bundled assets. Tauri watches `http://localhost:1420` and rebuilds the Rust backend only when `src-tauri/` changes.
+The app runs against the frontend dev server, not bundled assets.
 
 ## Build for production
 
@@ -69,10 +64,9 @@ npm run build
 
 This command:
 
-1. Builds Atlas and transpiles TypeScript, then Vite bundles the React frontend to `dist/`
-2. Compiles the Rust backend
-3. Bundles everything into a Windows NSIS installer and updater artifacts
-4. Outputs installers to `dist-installers/` along with updater metadata
+1. Runs `tauri build`: transpiles TypeScript, Vite bundles the React frontend to `dist/`, and the Rust backend is compiled
+2. Bundles platform installers — on Windows: an NSIS installer, an MSI, and a portable `tempest.exe`, plus updater artifacts
+3. Copies the NSIS setup executable and the portable executable to `dist-installers/` via `scripts/collect-artifacts.mjs`
 
 The production build optimizes the Rust binary for size with link-time optimization (LTO), code-generation unit optimization, and symbol stripping.
 
@@ -96,7 +90,11 @@ Output goes to `dist/`. This is useful for debugging frontend issues or testing 
 
 - `src/` : React TypeScript frontend code
 - `src-tauri/` : Rust backend code
-- `packages/atlas/` : Workspace containing code intelligence and token-graph features
+- `src-tauri/crates/hephaestus` : process isolation layer
+- `src-tauri/crates/dbiso` : Docker database branching
+- `packages/core`, `packages/crypto`, `packages/transport` : shared wire protocol, crypto, and transport for the mobile companion
+- `apps/` : mobile companion + relay worker
+- `web/` : marketing website (Next.js)
 - `dist/` : Frontend build output (created by `vite build`)
 - `dist-installers/` : Platform-specific installers (created by `tauri build`)
 - `resources/` : Assets bundled into the app at runtime

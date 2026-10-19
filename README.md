@@ -72,7 +72,7 @@ No other parallel-agent tool does this.
 
 ## One window. Every agent. No collisions.
 
-Claude Code, Aider, OpenCode, Copilot CLI, Cline, Goose — all running in parallel, each in its own isolated git worktree and branch. Agents never touch each other's files. No merge conflicts mid-run. No stashing. No detective work about who changed what.
+Claude Code, Codex CLI, Gemini CLI, Opencode, Copilot CLI, Cline, Goose — all running in parallel, each in its own isolated git worktree and branch. Agents never touch each other's files. No merge conflicts mid-run. No stashing. No detective work about who changed what.
 
 A rogue agent run never touches your main branch or anyone else's work. **Blast radius: zero.**
 
@@ -115,7 +115,7 @@ See [ROADMAP.md](ROADMAP.md) for the full picture. **Star this repo** — we ann
 
 Pre-built binaries are available for Windows, macOS, and Linux.
 
-Prerequisites: Node.js 18+, Rust 1.77+. Windows also requires the [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/).
+Prerequisites: Node.js 20+, Rust 1.77+. Windows also requires the [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/).
 
 ```bash
 git clone https://github.com/tempestai-dev/tempest

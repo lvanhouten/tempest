@@ -243,7 +243,7 @@ Install these tools first. The exact steps vary by platform.
     ### Windows Prerequisites
 
     <Steps>
-      <Step title="Node.js 18 or later">
+      <Step title="Node.js 20 or later">
         1. Download from [nodejs.org](https://nodejs.org/). Choose the LTS version (currently 22.x).
         2. Run the installer. Accept all defaults (npm is included).
         3. Verify installation:
@@ -253,7 +253,7 @@ Install these tools first. The exact steps vary by platform.
           npm --version
         </CodeBlock>
 
-        Both commands should print version numbers. Node 18.0.0 or later is required. Node 22+ is recommended.
+        Both commands should print version numbers. Node 20.0.0 or later is required (Atlas needs Node 20+). Node 22+ is recommended.
       </Step>
       <Step title="Rust 1.77 or later">
         1. Download and run the Rust installer from [rustup.rs](https://rustup.rs/).
@@ -304,7 +304,7 @@ Install these tools first. The exact steps vary by platform.
 
         Should print a version number (e.g., "Apple clang version 15.0.0").
       </Step>
-      <Step title="Node.js 18 or later">
+      <Step title="Node.js 20 or later">
         Install via [Homebrew](https://brew.sh/) (recommended):
 
         <CodeBlock language="bash">
@@ -384,7 +384,7 @@ Install these tools first. The exact steps vary by platform.
         - `patchelf`: Binary patching for bundled libraries
         - `libxdo-dev`: X11 window management
       </Step>
-      <Step title="Node.js 18 or later">
+      <Step title="Node.js 20 or later">
         Install via NodeSource repository (for latest LTS):
 
         <CodeBlock language="bash">
@@ -405,7 +405,7 @@ Install these tools first. The exact steps vary by platform.
           npm --version
         </CodeBlock>
 
-        Should show Node 18.0.0 or later.
+        Should show Node 20.0.0 or later.
       </Step>
       <Step title="Rust 1.77 or later">
         Install via [rustup](https://rustup.rs/):
@@ -460,14 +460,7 @@ Once prerequisites are installed, clone the repository and build:
       npm install
     </CodeBlock>
 
-    This installs React, Tauri CLI, TypeScript, Vite, and other JavaScript dependencies. Typically takes 1-2 minutes.
-  </Step>
-  <Step title="Build workspace assets (Atlas)">
-    <CodeBlock language="bash">
-      npm run setup
-    </CodeBlock>
-
-    This builds the Atlas workspace (code intelligence and token-graph features) and bundles them into resources. Required before running or building.
+    This installs React, Tauri CLI, TypeScript, Vite, and other JavaScript dependencies — and, via postinstall scripts, automatically stages the Atlas bundle, the chat bridge sidecars, and cloudflared. No separate asset setup step is needed. Typically takes 1-2 minutes.
   </Step>
   <Step title="Build for production">
     <CodeBlock language="bash">
@@ -477,18 +470,17 @@ Once prerequisites are installed, clone the repository and build:
     This step:
     1. Compiles TypeScript and bundles the React UI with Vite
     2. Compiles the Rust backend with Tauri
-    3. Creates platform-specific installers
+    3. Creates platform-specific installers and copies the Windows artifacts to `dist-installers\`
 
     Build time is 3-10 minutes depending on your machine.
 
     <Tabs>
       <Tab title="Windows">
-        Installers are created in `src-tauri\target\release\bundle\nsis\`:
+        The build produces an NSIS installer, an MSI package, and a portable executable, plus updater artifacts. `scripts/collect-artifacts.mjs` copies the Windows artifacts to `dist-installers\`:
         - `tempest_x.x.x_x64-setup.exe` (NSIS installer)
-        - `tempest_x.x.x_x64-setup.exe.sig` (updater signature file)
-
-        Also created in `src-tauri\target\release\`:
         - `tempest.exe` (portable executable)
+
+        Raw bundle output also remains in `src-tauri\target\release\bundle\` (`nsis\`, `msi\`) alongside the `.sig` updater signature files.
       </Tab>
       <Tab title="macOS">
         Installers are created in `src-tauri/target/release/bundle/`:
@@ -531,15 +523,16 @@ To iterate quickly on code changes:
 
 <Steps>
   <Step title="Install prerequisites (same as above)">
-    Ensure Node.js 18+, Rust 1.77+, and platform-specific tools are installed.
+    Ensure Node.js 20+, Rust, and platform-specific tools are installed.
   </Step>
   <Step title="Clone and setup">
     <CodeBlock language="bash">
       git clone https://github.com/tempestai-dev/tempest
       cd tempest
       npm install
-      npm run setup
     </CodeBlock>
+
+    The postinstall scripts stage Atlas, the chat bridge sidecars, and cloudflared automatically.
   </Step>
   <Step title="Start development server">
     <CodeBlock language="bash">
@@ -702,10 +695,10 @@ If not found, reinstall Node.js from [nodejs.org](https://nodejs.org/).
   </Tab>
 </Tabs>
 
-2. Rebuild workspace assets:
+2. Re-run `npm install` — the postinstall scripts re-stage Atlas, the chat bridge sidecars, and cloudflared:
 
 <CodeBlock language="bash">
-  npm run setup
+  npm install
   npm run dev
 </CodeBlock>
 

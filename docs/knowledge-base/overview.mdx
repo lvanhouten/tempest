@@ -8,7 +8,7 @@ icon: "network"
 
 The Knowledge Base tab is the visual companion to [Token Intelligence (Atlas)](/token-intelligence/overview). Where Atlas gives your agents a machine-readable code graph, the Knowledge Base gives *you* a way to see the same graph, drop your own docs into it, and explore how symbols connect.
 
-Open it from the sidebar's **Knowledge Base** entry. Only projects with an existing `.atlas/` database show up in the project picker.
+Open it from the sidebar's **Knowledge Base** entry. Only projects with an existing `.tempest/atlas/atlas.db` database show up in the project picker.
 
 ## Layout
 
@@ -108,8 +108,8 @@ The **Add** and trash actions in the Docs panel additionally call the mutating t
 
 | Setting | Location | Effect |
 |---------|----------|--------|
-| **Token Intelligence** | Settings → Token Intelligence | Master switch. Off → no `.atlas/` database, no graph, no tools. |
+| **Token Intelligence** | Settings → Token Intelligence | Master switch. Off → no `.tempest/atlas/` database, no graph, no tools. |
 | **Semantic search** | Settings → Token Intelligence → Semantic | Downloads the MiniLM model and enables `atlas_semantic_search`. Requires Token Intelligence on. |
 | `ATLAS_MCP_TOOLS` (env) | Per-agent | Re-includes hidden tools in the MCP list. |
 
-The Atlas indexing modal (`AtlasIndexModal`) surfaces on first index, polls for `.atlas/atlas.db` every 2 s, and auto-dismisses ~1.5 s after completion. It streams `atlas:log` events from the indexing process into the modal so you see progress in real time.
+The Atlas indexing modal (`AtlasIndexModal`) surfaces on first index, polls the `check_atlas_db` command every 2 s (which checks that `.tempest/atlas/atlas.db` exists), and auto-dismisses ~1.5 s after completion. It streams `atlas:log` events from the indexing process into the modal so you see progress in real time.

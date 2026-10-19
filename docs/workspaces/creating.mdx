@@ -14,7 +14,7 @@ A workspace in Tempest is an isolated git worktree that runs one agent or termin
 A workspace is:
 - A git worktree (independent working tree) created under `.tempest/<name>/`
 - A dedicated branch with the same name as the worktree folder
-- A terminal session or an agent session (Claude Code, Gemini CLI, Opencode, Cursor, Cline, Copilot CLI, or Goose)
+- A terminal session or an agent session (Claude Code, Codex CLI, Gemini CLI, Cursor Agent, and more — 16 agents ship built in, driven by the agent manifest; see [Supported Agents](/agents/supported))
 - An isolated environment where one agent can make changes without affecting others
 
 Workspaces share the project's node_modules, .venv, and environment files (.env) through filesystem links to avoid duplication and overhead.
@@ -32,22 +32,13 @@ The menu appears with these options:
     Open a bare terminal session in this workspace. No agent is involved, just bash or powershell.
   </Tab>
   <Tab title="Agent Session">
-    Start a coding agent. Hover to see all available agents:
-    - **Claude Code** - claude.com CLI with session resumption
-    - **Gemini CLI** - Google's Gemini agent
-    - **Opencode** - OpenAPI-driven agent with session capture
-    - **Copilot CLI** - GitHub Copilot command line
-    - **Cline** - Autonomous browser-based agent
-    - **Cursor Agent** - Cursor editor agent
-    - **Goose** - Autonomous code generation agent
-  </Tab>
-  <Tab title="Chat" disabled>
-    Coming soon. Will allow direct conversation within the workspace.
-  </Tab>
-  <Tab title="Live Preview">
-    Open an embedded browser to preview your dev server output. Only available when enabled in settings.
+    Start a coding agent. The launch list is driven by the agent manifest —
+    Claude Code, Codex CLI, Gemini CLI, Cursor Agent, Goose, and more
+    (see [Supported Agents](/agents/supported)).
   </Tab>
 </Tabs>
+
+Chat is not a session type here — it is a canvas node on the Threads workspace (see [Threads](/threads/overview)).
 
 Clicking any option opens a modal to name your workspace and optionally configure the session.
 
@@ -130,7 +121,7 @@ Once git is confirmed to exist, Tempest calls the Rust backend to create the wor
 
 1. **Ensure at least one commit exists**
    - Checks `git rev-parse --verify HEAD`
-   - If no commits: creates `.tempest.gitignore`, stages files, and commits with author "Tempest"
+   - If no commits: ensures the project's `.gitignore` contains `.tempest/` and `.tempest-pid` entries, stages files, and commits with author "Tempest"
    - This is necessary because git worktree needs a HEAD to branch from
 
 2. **Prune stale worktree metadata**
@@ -144,7 +135,8 @@ Once git is confirmed to exist, Tempest calls the Rust backend to create the wor
    - If the directory exists but is not registered, removes it and continues
 
 5. **Create the git worktree**
-   - Runs `git worktree add .tempest/<name> -b <name>`
+   - First tries the warm pool: Tempest keeps up to 3 pre-materialized worktree slots per project, each valid for 5 minutes, and claims one instantly if available
+   - Otherwise runs `git worktree add --no-checkout .tempest/<name> -b <name>` and then materializes the working tree
    - Creates a new branch with the same name as the worktree folder
    - The branch is a sibling to main, ready for independent commits
 
@@ -171,8 +163,8 @@ Once git is confirmed to exist, Tempest calls the Rust backend to create the wor
    - If empty, errors: "Workspace created but contains no files. Your project files may be untracked or gitignored. Run 'git add && git commit' in the project root first."
    - This prevents the agent from seeing an empty directory
 
-10. **Ensure .tempest.gitignore exists**
-    - Writes a root-level `.tempest.gitignore` that ignores `.tempest/` (so worktrees don't get committed)
+10. **Ensure the project .gitignore covers Tempest paths**
+    - Appends `.tempest/` and `.tempest-pid` entries to the project's `.gitignore` if missing (no separate ignore file is created)
 
 Once creation succeeds, the workspace's path is returned to the frontend and the session launches.
 
@@ -220,7 +212,7 @@ Tempest supports two types of sessions:
     None - all sessions see the same working tree
   </Tab>
   <Tab title="Persistence">
-    Agent root sessions are resumed by conversation ID. Terminal root sessions are not persisted between restarts
+    Agent root sessions are resumed by conversation ID. Terminal root sessions are restored on restart with scrollback replayed from ring buffers
   </Tab>
 </Tabs>
 
@@ -253,26 +245,24 @@ my-project/
 │   │   ├── src/
 │   │   ├── package.json
 │   │   └── node_modules -> ../../node_modules  (symlink/junction)
-│   ├── atlas/                 <-- internal (not a worktree)
-│   │   └── index.db
-│   └── logs/                  <-- internal (not a worktree)
-│       └── tempest.log
+│   └── atlas/                 <-- internal (not a worktree)
+│       └── atlas.db
 ├── src/
 ├── node_modules/              <-- shared across all worktrees
 ├── .venv/                      <-- shared across all worktrees
-├── .tempest.gitignore
+├── .gitignore                  <-- includes .tempest/ and .tempest-pid
 ├── .env
 └── package.json
 ```
 
 **Key points:**
-- `.tempest/` itself is ignored by git (added to `.tempest.gitignore`)
+- `.tempest/` itself is ignored by git (added to the project's `.gitignore`)
 - Each worktree is a sibling folder named after its branch
-- `atlas/` and `logs/` are reserved for Tempest internals and are never treated as git worktrees
+- `atlas/` is reserved for Tempest internals and is never treated as a git worktree
 - Each worktree's `.git` is a file pointing to `.git/worktrees/<name>` in the main repository
 
 <Callout type="info">
-The sidebar will only list `.tempest/` subdirectories that are registered as git worktrees. Reserved directories like `atlas/` and `logs/` are hidden from the workspace list.
+The sidebar will only list `.tempest/` subdirectories that are registered as git worktrees. Reserved directories like `atlas/` are hidden from the workspace list.
 </Callout>
 
 ## Branch Naming Conventions
@@ -281,7 +271,7 @@ When you create a worktree workspace, a git branch is automatically created with
 
 ### Branch Prefix Setting
 
-Tempest respects a `branchPrefix` setting (configured in Settings > Appearance). If set:
+Tempest respects a `branchPrefix` setting (configured in Settings → Git). If set:
 - Workspace name: `my-feature`
 - Branch prefix: `dev/`
 - Actual branch name: `dev/my-feature`
@@ -386,7 +376,7 @@ This usually happens if:
 
 ### Opening an Existing Project
 
-In default mode (not zen), click **Open Project** on the Overview page or use Ctrl+K (Settings > Keybindings):
+In default mode (not zen), click **Open Project** on the Overview page or press Ctrl+O (configurable in Settings → Keyboard):
 
 1. Choose a folder containing a `.git/` directory
 2. Tempest scans `.tempest/` for existing worktrees
@@ -406,14 +396,7 @@ The first workspace creation will initialize git if needed.
 
 ### Zen Mode
 
-If you launch Tempest pointing to a single project folder (via CLI or app launcher), Zen mode activates:
-
-- Only that project's workspaces are shown
-- Sidebar is simplified
-- "New Workspace" button is prominent
-- No project switcher
-
-Zen mode is useful for focused work on one project.
+Tempest includes Rust-side support for launching a simplified, single-project zen window. The UI entry point is not currently exposed, so there is nothing to enable yet — zen windows are planned infrastructure.
 
 ## Branch Naming Edge Cases
 
@@ -454,9 +437,10 @@ In the sidebar, sessions are identified by:
 
 ### How Sessions Persist
 
+All sessions — worktree and root — are stored in the SQLite sessions table (`tempest.db` in the app data dir).
+
 **Worktree agent sessions:**
-- Stored in browser localStorage under the worktree path
-- Includes agent type, conversation ID, and session name
+- Keyed by worktree path; includes agent type, conversation ID, and session name
 - Resumed on app restart if the worktree still exists
 
 **Root agent sessions:**
@@ -465,12 +449,10 @@ In the sidebar, sessions are identified by:
 - Survive app restart as long as the project is still open
 
 **Terminal sessions (worktree or root):**
-- Not persisted between restarts
-- New terminal appears as a fresh tab each time
+- Restored on restart, with scrollback replayed from ring buffers
 
 **Non-terminal tabs (Diff, Preview, Editor):**
-- Persisted by instance ID in runtime state
-- Re-opened on app launch
+- Persisted by instance ID and re-opened on app launch
 
 <Callout type="tip">
 You can rename any session by double-clicking its tab. The rename doesn't change the branch name (worktree) or workspace folder, only the display name in Tempest.
