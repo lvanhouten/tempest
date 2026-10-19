@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use dashmap::DashMap;
 use tauri::ipc::Channel;
 use tauri::Emitter;
+use tauri::Manager;
 use hephaestus::Isolate;
 
 mod agent_hooks;
@@ -4634,7 +4635,7 @@ async fn create_pty_session(
         let cwd_defer = cwd_for_db;
         let invocation_defer = invocation_for_db;
         tauri::async_runtime::spawn(async move {
-            write_pty_bytes(&app, &sid, b"Preparing isolated database branch…\r\n");
+            write_pty_bytes(&app, &sid, b"Preparing isolated database branch...\r\n");
             match dbiso::branch_create(
                 &format!("tempest-{}", &sid[..8.min(sid.len())]),
                 &cwd_defer,
