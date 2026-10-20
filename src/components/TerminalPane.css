@@ -9,7 +9,7 @@
 
 .terminal-pane {
   flex: 1;
-  padding: 8px;
+  margin: 8px;
   box-sizing: border-box;
   overflow: hidden;
   min-height: 0;
@@ -57,6 +57,10 @@
 
 .terminal-pane .xterm {
   height: 100%;
+}
+
+.terminal-pane .xterm .xterm-viewport {
+  background-color: var(--tempest-bg-editor);
 }
 
 /* Hide the native browser scrollbar — xterm renders its own Monaco-style DOM scrollbar on top */
