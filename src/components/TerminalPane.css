@@ -59,6 +59,10 @@
   height: 100%;
 }
 
+.terminal-pane .xterm .xterm-viewport {
+  background-color: var(--tempest-bg-editor);
+}
+
 /* Hide the native browser scrollbar — xterm renders its own Monaco-style DOM scrollbar on top */
 .terminal-pane .xterm-viewport {
   scrollbar-width: none !important;
