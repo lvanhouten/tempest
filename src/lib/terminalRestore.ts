@@ -49,6 +49,10 @@ export interface RestoreController {
    * the cache and schedule a corrective fit that will send regardless of the
    * previously "sent" dims. */
   notifyFontReady(): void;
+  /** Backend PTY just registered. Fits sent before then reached no PTY, and
+   * the spawn path may have resized it to an estimate since, so clear the
+   * cache and schedule a fit that sends. */
+  ptyReady(): void;
   /** Cancel all queued frames; every later call and callback becomes a no-op. */
   dispose(): void;
 }
@@ -119,6 +123,13 @@ export function createRestoreController(deps: RestoreControllerDeps): RestoreCon
     });
   }
 
+  // Drops the cached dims so the next fit sends even if its dims match them.
+  function forceFit(): void {
+    if (disposed) return;
+    lastSent = null;
+    scheduleFit();
+  }
+
   return {
     fitNow,
     scheduleFit,
@@ -146,11 +157,8 @@ export function createRestoreController(deps: RestoreControllerDeps): RestoreCon
       if (disposed) return;
       lastSent = null;
     },
-    notifyFontReady(): void {
-      if (disposed) return;
-      lastSent = null;
-      scheduleFit();
-    },
+    notifyFontReady: forceFit,
+    ptyReady: forceFit,
     dispose(): void {
       disposed = true;
       fitPending = false;
