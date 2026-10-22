@@ -73,6 +73,17 @@ struct DirEntry {
     is_dir: bool,
 }
 
+// Does the path exist? Distinguishes a confirmed missing/present state
+// (Ok(false)/Ok(true)) from a transient I/O failure (Err). Callers that
+// prune state on "missing" MUST keep the state on Err — a drive dropping
+// offline for a tick is not evidence the file is gone.
+#[tauri::command(async)]
+fn path_exists(path: String) -> Result<bool, String> {
+    #[cfg(windows)]
+    let path = path.replace('/', "\\");
+    std::path::Path::new(&path).try_exists().map_err(|e| e.to_string())
+}
+
 #[tauri::command(async)]
 fn list_directory(path: String) -> Result<Vec<DirEntry>, String> {
     #[cfg(windows)]
@@ -5226,6 +5237,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             create_workspace,
             list_directory,
+            path_exists,
             create_terminal_worktree,
             git_init,
             get_git_branch,

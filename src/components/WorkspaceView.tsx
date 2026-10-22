@@ -10,7 +10,7 @@ import { addRecent, getRecents, removeRecent } from "../store/recents";
 import { getOpenProjects, saveOpenProjects } from "../store/openProjects";
 import { setProjectWorktreeMeta } from "../store/worktrees";
 import { track } from "../lib/telemetry";
-import { getSession, getBranchSessions, getRootSessionsForProject, getAllSessions, getBranchPath, getAllBranches, getProjectPath, saveSession, setSessionConversationId, setSessionName, markSessionClosed, removeBranchByPath, removeSession, pruneSessions, subscribeSessionLifecycle } from "../store/sessions";
+import { getSession, getBranchSessions, getRootSessionsForProject, getAllSessions, getBranchPath, getAllBranches, getProjectPath, saveSession, setSessionConversationId, setSessionName, markSessionClosed, removeBranchByPath, removeSession, pruneSessions, subscribeSessionLifecycle, ensureBranchForWorktree } from "../store/sessions";
 import { getRuntimeState, setRuntimeState } from "../lib/runtimeState";
 import { anchoredSessionIds, externalBranchCandidates } from "./worktreeRestore";
 import { loadProjectSettings } from "./ProjectSettingsPanel/useProjectSettings";
@@ -377,12 +377,14 @@ export function WorkspaceView({ zen, name, path }: Props) {
 
       // Saved branches whose worktree lives outside .tempest/ (opened directly
       // from an existing checkout) are invisible to the scan above — keep the
-      // ones whose folder still exists on disk.
+      // ones whose folder still exists on disk. A transient `path_exists`
+      // failure (offline drive, permission blip) keeps the branch rather than
+      // silently pruning its sessions — Ok(false) is the only "really gone".
       const externalBranches = externalBranchCandidates(
         getAllBranches(), new Set(projects.map((p) => p.id)), diskWorktreePaths);
       const externalExists = await Promise.all(
         externalBranches.map((b) =>
-          invoke("list_directory", { path: b.path }).then(() => true, () => false)
+          invoke<boolean>("path_exists", { path: b.path }).then((ok) => ok, () => true)
         )
       );
       const liveExternal = externalBranches.filter((_, i) => externalExists[i]);
@@ -1483,6 +1485,10 @@ export function WorkspaceView({ zen, name, path }: Props) {
       let rollbackPath: string | undefined;
       if (directWorktreePath) {
         worktreePath = directWorktreePath;
+        // Pre-mint the branch row with its live display name — ensureBranch's
+        // basename fallback would overwrite "features-foo" with the folder
+        // name a user picked, and the mismatch surfaces after a restart.
+        if (workingProjectId) ensureBranchForWorktree(workingProjectId, worktreePath, branchName);
         addWorktreeToState({ name: branchName, path: worktreePath }, workingProjectId);
       } else {
         const dirName = branchName.replace(/\//g, "-");

@@ -166,19 +166,31 @@ function ensureProject(projectId: string, cwd: string): DbProject | undefined {
 }
 
 // Ensure a branch row exists in the mirror for `worktreePath`, minting one on
-// first sight. The DB row is written by persistSession's ordered chain.
-function ensureBranch(projectId: string, worktreePath: string): DbBranch {
+// first sight. The DB row is written by persistSession's ordered chain. When
+// `name` is provided (e.g. an external worktree opened by its git branch name
+// via the picker), it is used verbatim — otherwise we fall back to the folder
+// basename, which matches .tempest-created worktrees but can drift from the
+// live sidebar label for externally-named folders.
+function ensureBranch(projectId: string, worktreePath: string, name?: string): DbBranch {
   const existing = _branchByPath.get(worktreePath);
   if (existing) return existing;
   const branch: DbBranch = {
     id: crypto.randomUUID(),
     projectId,
-    name: basename(worktreePath),
+    name: name ?? basename(worktreePath),
     path: worktreePath,
   };
   _branchById.set(branch.id, branch);
   _branchByPath.set(branch.path, branch);
   return branch;
+}
+
+// Pre-mint a branch row with its live display name before the first session
+// save routes through ensureBranch. For external worktrees opened from the
+// picker: the folder basename can differ from the git branch name, and we want
+// the row to carry the branch name so the sidebar label survives a restart.
+export function ensureBranchForWorktree(projectId: string, worktreePath: string, name: string): void {
+  ensureBranch(projectId, worktreePath, name);
 }
 
 // Per-session FIFO write chain. Every DB mutation for a given id (upsert /
