@@ -2099,6 +2099,14 @@ export function WorkspaceView({ zen, name, path }: Props) {
                     onRenameClear={() => setRenamingSessionId(null)}
                     onRenameStart={startRename}
                     onQueueClick={(id, e) => { e.stopPropagation(); setQueueOpenSessionId((prev) => (prev === id ? null : id)); }}
+                    onTabContextMenu={(id, e) => {
+                      const s = sessions.find((x) => x.id === id);
+                      if (!s) return;
+                      const proj = projects.find((p) => p.id === s.projectId);
+                      const projectPath = proj?.path ?? s.cwd;
+                      const wt = proj?.worktrees.find((w) => w.path === s.cwd) ?? null;
+                      openCtxMenu(e, wt, projectPath, s.projectId, s.id);
+                    }}
                     onCloseGroup={(projectId) => sessions.filter(s => s.projectId === projectId).forEach(s => closeSession(s.id))}
                     projects={projects.map((p) => ({ id: p.id, name: p.name }))}
                     onNewSession={(e) => {
@@ -2557,6 +2565,7 @@ export function WorkspaceView({ zen, name, path }: Props) {
           onOpenDeleteDialog={openDeleteDialog}
           onRemoveProject={removeProject}
           onAtlasIndexingStart={(path) => setAtlasIndexingPaths((prev) => prev.includes(path) ? prev : [...prev, path])}
+          onRenameSession={(id, name) => { setActiveSessionId(id); startRename(id, name); }}
         />
       )}
 

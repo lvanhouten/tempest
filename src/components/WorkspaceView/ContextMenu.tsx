@@ -4,6 +4,7 @@ const Eye = (p: any) => <UiIcon name="eye" {...p} />;
 const X = (p: any) => <UiIcon name="x" {...p} />;
 const Database = (p: any) => <UiIcon name="database" {...p} />;
 const Trash2 = (p: any) => <UiIcon name="trash-2" {...p} />;
+const Pencil = (p: any) => <UiIcon name="pencil" {...p} />;
 import { FileIcon } from "../../icons/FileIcon";
 import { getSettings } from "../../store/appSettings";
 import { getRuntimeState, setRuntimeState } from "../../lib/runtimeState";
@@ -38,12 +39,13 @@ type Props = {
   ) => void;
   onRemoveProject: (projectId: string) => void;
   onAtlasIndexingStart: (projectPath: string) => void;
+  onRenameSession: (sessionId: string, currentName: string) => void;
 };
 
 export function ContextMenu({
   menu, sessions, onClose,
   onOpenDiff, onCloseSession,
-  onOpenDeleteDialog, onRemoveProject, onAtlasIndexingStart,
+  onOpenDeleteDialog, onRemoveProject, onAtlasIndexingStart, onRenameSession,
 }: Props) {
   const m = menu;
   const targetSession = m.sessionId ? sessions.find((s) => s.id === m.sessionId) : null;
@@ -91,6 +93,14 @@ export function ContextMenu({
         <button className="ctx-item" onClick={() => { onOpenDiff(diffPath, m.projectId); onClose(); }}>
           <Eye size={13} /> Open diff
         </button>
+        {targetSession && (
+          <button
+            className="ctx-item"
+            onClick={() => { onRenameSession(targetSession.id, targetSession.name); onClose(); }}
+          >
+            <Pencil size={13} /> Rename
+          </button>
+        )}
         {canClose && (
           <button className="ctx-item" onClick={() => { onCloseSession(m.sessionId!); onClose(); }}>
             <X size={13} /> Close

@@ -58,6 +58,7 @@ interface Props {
   onRenameClear: () => void;
   onRenameStart: (id: string, name: string) => void;
   onQueueClick: (id: string, e: React.MouseEvent) => void;
+  onTabContextMenu?: (id: string, e: React.MouseEvent<HTMLElement>) => void;
   onCloseGroup?: (projectId: string) => void;
   projects?: { id: string; name: string }[];
   onNewSession?: (e: React.MouseEvent<HTMLElement>) => void;
@@ -79,6 +80,7 @@ export default function AgentTabs({
   onDragStart, onDragOver, onDrop, onDragEnd, onDragLeave,
   renamingSessionId, renameValue, onRenameChange, onRenameCommit, onRenameClear, onRenameStart,
   onQueueClick,
+  onTabContextMenu,
   onCloseGroup,
   projects,
   onNewSession,
@@ -132,6 +134,7 @@ export default function AgentTabs({
           onDrop={(e)      => onDrop(s.id, e)}
           onDragEnd={onDragEnd}
           onClick={() => onTabClick(s.id)}
+          onContextMenu={onTabContextMenu ? (e) => onTabContextMenu(s.id, e) : undefined}
         >
           <SessionIcon session={s} />
           {renamingSessionId === s.id ? (
@@ -151,6 +154,7 @@ export default function AgentTabs({
           ) : (
             <span
               className="session-tab-name"
+              title={`${s.name} — double-click to rename`}
               onDoubleClick={(e) => { e.stopPropagation(); onRenameStart(s.id, s.name); }}
             >
               {s.name}
